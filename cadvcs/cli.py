@@ -54,6 +54,9 @@ def main(argv=None):
     s.add_argument("ref", nargs="?", default="HEAD")
 
     s = sub.add_parser("branch"); s.add_argument("name", nargs="?")
+    s.add_argument("-d", "--delete", action="store_true")
+    s.add_argument("-D", "--force-delete", action="store_true")
+    sub.add_parser("gc")
     s = sub.add_parser("switch")
     s.add_argument("name"); s.add_argument("--force", action="store_true")
 
@@ -121,8 +124,17 @@ def main(argv=None):
                 print(f"c{c['id']}{merge}{decorations}  {c['created_at']}  "
                       f"{c['author']:<8} {c['message']}")
 
+        elif args.cmd == "gc":
+            stats = repo.gc()
+            print(f"gc: {stats['commits_removed']} commits, "
+                  f"{stats['blobs_removed']} blobs, "
+                  f"{stats['bytes_freed']} bytes liberados")
+
         elif args.cmd == "branch":
-            if args.name:
+            if args.name and (args.delete or args.force_delete):
+                repo.branch_delete(args.name, force=args.force_delete)
+                print(f"Rama {args.name} eliminada")
+            elif args.name:
                 repo.branch_create(args.name)
                 print(f"Rama {args.name} creada en c{repo.head_commit_id()}")
             else:

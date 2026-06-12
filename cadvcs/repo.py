@@ -261,6 +261,86 @@ class Repo:
                 for r in rows}
 
     # ================================================== branch / tag / switch
+    def branch_delete(self, name: str, force: bool = False):
+        if name == self.current_branch:
+            raise CadVcsError("No se puede borrar la rama actual")
+        row = self.conn.execute(
+            "SELECT head_commit_id FROM branches WHERE name = ?", (name,)
+        ).fetchone()
+        if not row:
+            raise CadVcsError(f"La rama {name} no existe")
+        # Protección estilo git branch -d: no borrar trabajo no mergeado
+        if not force and row["head_commit_id"] is not None:
+            head = self.head_commit_id()
+            if head is None or row["head_commit_id"] not in self._ancestors(head):
+                raise CadVcsError(
+                    f"{name} tiene commits no alcanzables desde "
+                    f"{self.current_branch} (usa force)")
+        with self.conn:
+            self.conn.execute("DELETE FROM branches WHERE name = ?", (name,))
+
+    def tag_delete(self, name: str):
+        with self.conn:
+            cur = self.conn.execute("DELETE FROM tags WHERE name = ?", (name,))
+        if cur.rowcount == 0:
+            raise CadVcsError(f"El tag {name} no existe")
+
+    def gc(self) -> dict:
+        """Mark-and-sweep: elimina commits inalcanzables desde cualquier
+        ref y los blobs/índices que solo ellos referenciaban."""
+        # MARK: alcanzable desde todas las ramas y tags
+        roots = [r["head_commit_id"] for r in self.conn.execute(
+            "SELECT head_commit_id FROM branches "
+            "WHERE head_commit_id IS NOT NULL").fetchall()]
+        roots += [r["commit_id"] for r in self.conn.execute(
+            "SELECT commit_id FROM tags").fetchall()]
+        reachable: set[int] = set()
+        for root in roots:
+            reachable |= self._ancestors(root)
+
+        all_commits = {r["id"] for r in self.conn.execute(
+            "SELECT id FROM commits").fetchall()}
+        dead_commits = all_commits - reachable
+
+        # SWEEP de metadata
+        with self.conn:
+            if dead_commits:
+                marks = ",".join("?" * len(dead_commits))
+                ids = list(dead_commits)
+                self.conn.execute(
+                    f"DELETE FROM commit_entries WHERE commit_id IN ({marks})",
+                    ids)
+                self.conn.execute(
+                    f"DELETE FROM commits WHERE id IN ({marks})", ids)
+        live_blobs = {r["blob_sha"] for r in self.conn.execute(
+            "SELECT DISTINCT blob_sha FROM commit_entries").fetchall()}
+        # Los archivos del workdir actual también están vivos
+        for rp in self._tracked():
+            fs = self.root / rp
+            if fs.exists():
+                live_blobs.add(BlobStore.hash_file(fs))
+
+        # SWEEP de blobs e índice semántico
+        dead_blobs = 0
+        freed = 0
+        for shard in self.store.root.iterdir():
+            if not shard.is_dir():
+                continue
+            for obj in shard.iterdir():
+                sha = shard.name + obj.name
+                if sha not in live_blobs:
+                    freed += obj.stat().st_size
+                    obj.unlink()
+                    dead_blobs += 1
+        if dead_blobs:
+            with self.conn:
+                placeholders = ",".join("?" * len(live_blobs)) or "''"
+                self.conn.execute(
+                    f"DELETE FROM entities WHERE blob_sha NOT IN "
+                    f"({placeholders})", list(live_blobs))
+        return {"commits_removed": len(dead_commits),
+                "blobs_removed": dead_blobs, "bytes_freed": freed}
+
     def branch_create(self, name: str):
         if self.conn.execute("SELECT 1 FROM branches WHERE name = ?",
                              (name,)).fetchone():
