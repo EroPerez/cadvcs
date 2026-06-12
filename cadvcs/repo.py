@@ -346,12 +346,45 @@ class Repo:
             queue += [p for p in (row["parent_id"], row["parent2_id"]) if p]
         return None
 
-    def log(self, ref: str = "HEAD", limit: int = 50) -> list[dict]:
+    def log(self, ref: str = "HEAD", limit: int = 50,
+            author: str | None = None, path: str | None = None,
+            since: str | None = None, before_id: int | None = None) -> list[dict]:
+        """Historia first-parent con filtros y paginación por cursor.
+
+        author/since filtran por autor y fecha mínima (ISO); path conserva
+        solo commits que TOCARON ese archivo (su blob difiere del padre);
+        before_id es el cursor: continúa por debajo de ese commit.
+        """
         out, cid = [], self.resolve(ref)
+        skipping = before_id is not None
         while cid and len(out) < limit:
             row = self.conn.execute(
                 "SELECT id, parent_id, parent2_id, author, message, created_at "
                 "FROM commits WHERE id = ?", (cid,)).fetchone()
+            if skipping:
+                if row["id"] == before_id:
+                    skipping = False
+                cid = row["parent_id"]
+                continue
+            if author and row["author"] != author:
+                cid = row["parent_id"]
+                continue
+            if since and row["created_at"] < since:
+                break  # first-parent es descendente en el tiempo
+            if path:
+                sha = self.conn.execute(
+                    "SELECT blob_sha FROM commit_entries "
+                    "WHERE commit_id = ? AND repo_path = ?",
+                    (row["id"], path)).fetchone()
+                parent_sha = self.conn.execute(
+                    "SELECT blob_sha FROM commit_entries "
+                    "WHERE commit_id = ? AND repo_path = ?",
+                    (row["parent_id"], path)).fetchone() if row["parent_id"] else None
+                touched = (sha is None) != (parent_sha is None) or (
+                    sha and parent_sha and sha["blob_sha"] != parent_sha["blob_sha"])
+                if not touched:
+                    cid = row["parent_id"]
+                    continue
             d = dict(row)
             d["is_merge"] = row["parent2_id"] is not None
             d["branches"] = [b["name"] for b in self.conn.execute(

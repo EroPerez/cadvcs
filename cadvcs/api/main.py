@@ -146,8 +146,14 @@ def commit(name: str, body: S.CommitRequest,
 
 
 @app.get("/repos/{name}/commits", response_model=list[S.CommitLogEntry])
-def log(name: str, ref: str = Query("HEAD"), limit: int = Query(50, le=500)):
-    return _open_repo(name).log(ref, limit)
+def log(name: str, ref: str = Query("HEAD"), limit: int = Query(50, le=500),
+        author: str | None = Query(None), path: str | None = Query(None),
+        since: str | None = Query(None,
+                                  description="fecha mínima ISO, ej. 2026-06-01"),
+        before_id: int | None = Query(None,
+                                      description="cursor de paginación")):
+    return _open_repo(name).log(ref, limit, author=author, path=path,
+                                since=since, before_id=before_id)
 
 
 # ----------------------------------------------------------- branches / tags
