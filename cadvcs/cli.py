@@ -18,6 +18,7 @@
 from __future__ import annotations
 
 import argparse
+import json as _json
 import sys
 from pathlib import Path
 
@@ -52,8 +53,14 @@ def main(argv=None):
 
     s = sub.add_parser("log")
     s.add_argument("ref", nargs="?", default="HEAD")
+    s.add_argument("--author"); s.add_argument("--path")
+    s.add_argument("--since"); s.add_argument("--limit", type=int, default=50)
+    s.add_argument("--json", action="store_true")
 
     s = sub.add_parser("branch"); s.add_argument("name", nargs="?")
+    s.add_argument("-d", "--delete", action="store_true")
+    s.add_argument("-D", "--force-delete", action="store_true")
+    sub.add_parser("gc")
     s = sub.add_parser("switch")
     s.add_argument("name"); s.add_argument("--force", action="store_true")
 
@@ -70,6 +77,10 @@ def main(argv=None):
                    metavar="PATH:HANDLE=CHOICE",
                    help="resolución manual, ej: plano.dxf:31=theirs "
                         "(repetible; '__file__' para binarios)")
+
+    s = sub.add_parser("cherry-pick")
+    s.add_argument("ref"); s.add_argument("--user", required=True)
+    s.add_argument("-m", "--message", default=None)
 
     s = sub.add_parser("blame")
     s.add_argument("file"); s.add_argument("--ref", default="HEAD")
@@ -114,15 +125,29 @@ def main(argv=None):
                   f"{len(info['changed'])} archivo(s): {', '.join(info['changed'])}")
 
         elif args.cmd == "log":
-            for c in repo.log(args.ref):
+            entries = repo.log(args.ref, args.limit, author=args.author,
+                               path=args.path, since=args.since)
+            if args.json:
+                print(_json.dumps(entries, indent=2, ensure_ascii=False))
+                return 0
+            for c in entries:
                 refs = c["branches"] + c["tags"]
                 decorations = f" ({', '.join(refs)})" if refs else ""
                 merge = " [merge]" if c["is_merge"] else ""
                 print(f"c{c['id']}{merge}{decorations}  {c['created_at']}  "
                       f"{c['author']:<8} {c['message']}")
 
+        elif args.cmd == "gc":
+            stats = repo.gc()
+            print(f"gc: {stats['commits_removed']} commits, "
+                  f"{stats['blobs_removed']} blobs, "
+                  f"{stats['bytes_freed']} bytes liberados")
+
         elif args.cmd == "branch":
-            if args.name:
+            if args.name and (args.delete or args.force_delete):
+                repo.branch_delete(args.name, force=args.force_delete)
+                print(f"Rama {args.name} eliminada")
+            elif args.name:
                 repo.branch_create(args.name)
                 print(f"Rama {args.name} creada en c{repo.head_commit_id()}")
             else:
@@ -187,6 +212,17 @@ def main(argv=None):
                         for c in conf:
                             print(f"  {rp}: {c.reason} {c.dxftype} "
                                   f"handle={c.handle}", file=sys.stderr)
+                return 1
+
+        elif args.cmd == "cherry-pick":
+            try:
+                info = repo.cherry_pick(args.ref, args.user, args.message)
+                if info["result"] == "empty":
+                    print("Nada que aplicar (cambios ya presentes)")
+                else:
+                    print(f"Cherry-pick OK → c{info['commit_id']}")
+            except MergeConflictError as exc:
+                print(f"error: {exc}", file=sys.stderr)
                 return 1
 
         elif args.cmd == "blame":

@@ -21,7 +21,7 @@ from collections import defaultdict
 from pathlib import Path
 
 from fastapi import Body, FastAPI, HTTPException, Query, Request
-from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.responses import FileResponse, JSONResponse, StreamingResponse, Response
 
 from fastapi import Depends
 
@@ -29,7 +29,8 @@ from .. import semdiff
 from ..repo import Repo, CadVcsError, LockError, MergeConflictError, REPO_DIR
 from ..storage import BlobStore
 from . import schemas as S
-from .auth import Principal, get_principal
+from .auth import (Principal, get_principal, require_admin,
+                   require_editor, require_viewer)
 
 DATA_DIR = Path(os.environ.get("CADVCS_DATA", "./cadvcs-data")).resolve()
 DATA_DIR.mkdir(parents=True, exist_ok=True)
@@ -41,7 +42,7 @@ app = FastAPI(
     version="0.4.0",
     description="Control de versiones tipo Git para archivos CAD "
                 "con merge a nivel de entidad DXF y auth OIDC",
-    dependencies=[Depends(get_principal)],   # toda la API requiere JWT válido
+    dependencies=[Depends(require_viewer)],  # JWT válido + rol viewer mínimo
 )
 
 
@@ -79,8 +80,39 @@ def _cadvcs_error(request: Request, exc: CadVcsError):
     return JSONResponse(status_code=status, content={"detail": str(exc)})
 
 
+@app.get("/health")
+def health():
+    """Liveness/readiness: verifica metadata DB y storage escribible."""
+    import uuid as _uuid
+    checks = {"database": "ok", "storage": "ok"}
+    status = 200
+    try:
+        from .. import db as _db
+        probe = DATA_DIR / ".healthcheck"
+        conn = _db.connect(probe / "metadata.db", repo_key="healthcheck") \
+            if _db.DB_URL else None
+        if conn:
+            conn.execute("SELECT 1").fetchone()
+    except Exception as exc:
+        checks["database"] = f"error: {exc}"
+        status = 503
+    try:
+        token = DATA_DIR / f".health-{_uuid.uuid4().hex}"
+        token.write_text("ok")
+        token.unlink()
+    except Exception as exc:
+        checks["storage"] = f"error: {exc}"
+        status = 503
+    return JSONResponse(status_code=status,
+                        content={"status": "ok" if status == 200 else "degraded",
+                                 "backend": "postgresql" if os.environ.get(
+                                     "CADVCS_DB_URL") else "sqlite",
+                                 "checks": checks})
+
+
 # ----------------------------------------------------------- repos
-@app.post("/repos", response_model=S.RepoInfo, status_code=201)
+@app.post("/repos", response_model=S.RepoInfo, status_code=201,
+          dependencies=[Depends(require_editor)])
 def create_repo(body: S.RepoCreate):
     root = _repo_root(body.name)
     if (root / REPO_DIR).exists():
@@ -104,7 +136,8 @@ def get_repo(name: str):
 
 
 # ----------------------------------------------------------- archivos
-@app.put("/repos/{name}/files/{file_path:path}", response_model=S.UploadResponse)
+@app.put("/repos/{name}/files/{file_path:path}", response_model=S.UploadResponse,
+         dependencies=[Depends(require_editor)])
 def upload_file(name: str, file_path: str, body: bytes = Body(media_type="application/octet-stream")):
     """Sube contenido a la working copy y lo marca como tracked."""
     with _repo_locks[name]:
@@ -140,7 +173,8 @@ def status(name: str):
     return S.StatusResponse(branch=repo.current_branch, **repo.status())
 
 
-@app.post("/repos/{name}/commits", response_model=S.CommitInfo, status_code=201)
+@app.post("/repos/{name}/commits", response_model=S.CommitInfo, status_code=201,
+          dependencies=[Depends(require_editor)])
 def commit(name: str, body: S.CommitRequest,
            who: Principal = Depends(get_principal)):
     with _repo_locks[name]:
@@ -149,8 +183,14 @@ def commit(name: str, body: S.CommitRequest,
 
 
 @app.get("/repos/{name}/commits", response_model=list[S.CommitLogEntry])
-def log(name: str, ref: str = Query("HEAD"), limit: int = Query(50, le=500)):
-    return _open_repo(name).log(ref, limit)
+def log(name: str, ref: str = Query("HEAD"), limit: int = Query(50, le=500),
+        author: str | None = Query(None), path: str | None = Query(None),
+        since: str | None = Query(None,
+                                  description="fecha mínima ISO, ej. 2026-06-01"),
+        before_id: int | None = Query(None,
+                                      description="cursor de paginación")):
+    return _open_repo(name).log(ref, limit, author=author, path=path,
+                                since=since, before_id=before_id)
 
 
 # ----------------------------------------------------------- branches / tags
@@ -159,7 +199,8 @@ def branches(name: str):
     return _open_repo(name).branches()
 
 
-@app.post("/repos/{name}/branches", response_model=S.BranchInfo, status_code=201)
+@app.post("/repos/{name}/branches", response_model=S.BranchInfo, status_code=201,
+          dependencies=[Depends(require_editor)])
 def create_branch(name: str, body: S.BranchCreate):
     with _repo_locks[name]:
         repo = _open_repo(name)
@@ -168,7 +209,8 @@ def create_branch(name: str, body: S.BranchCreate):
                             current=False)
 
 
-@app.post("/repos/{name}/switch", response_model=S.RepoInfo)
+@app.post("/repos/{name}/switch", response_model=S.RepoInfo,
+          dependencies=[Depends(require_editor)])
 def switch(name: str, body: S.SwitchRequest):
     with _repo_locks[name]:
         repo = _open_repo(name)
@@ -176,12 +218,31 @@ def switch(name: str, body: S.SwitchRequest):
         return _repo_info(repo, name)
 
 
+@app.delete("/repos/{name}/branches/{branch}", status_code=204)
+def delete_branch(name: str, branch: str, force: bool = Query(False)):
+    with _repo_locks[name]:
+        _open_repo(name).branch_delete(branch, force=force)
+
+
+@app.delete("/repos/{name}/tags/{tag}", status_code=204)
+def delete_tag(name: str, tag: str):
+    with _repo_locks[name]:
+        _open_repo(name).tag_delete(tag)
+
+
+@app.post("/repos/{name}/gc")
+def run_gc(name: str):
+    with _repo_locks[name]:
+        return _open_repo(name).gc()
+
+
 @app.get("/repos/{name}/tags", response_model=list[S.TagInfo])
 def tags(name: str):
     return _open_repo(name).tags()
 
 
-@app.post("/repos/{name}/tags", response_model=S.TagInfo, status_code=201)
+@app.post("/repos/{name}/tags", response_model=S.TagInfo, status_code=201,
+          dependencies=[Depends(require_editor)])
 def create_tag(name: str, body: S.TagCreate):
     with _repo_locks[name]:
         repo = _open_repo(name)
@@ -222,8 +283,55 @@ def _do_merge(name: str, branch: str, author: str, message: str | None,
                                author=author)
 
 
+@app.get("/repos/{name}/diff/visual")
+def diff_visual(name: str, ref_a: str = Query(...), ref_b: str = Query(...),
+                path: str = Query(...)):
+    """SVG con overlay de cambios entre dos versiones de un DXF.
+
+    Inmutable por par de refs+path → Cache-Control immutable; un proxy
+    o CDN puede cachearlo para siempre."""
+    import tempfile as _tf
+    from .. import visualdiff
+    repo = _open_repo(name)
+    ta = repo._tree(repo.resolve(ref_a))
+    tb = repo._tree(repo.resolve(ref_b))
+    if path not in ta or path not in tb:
+        raise HTTPException(404, f"{path} no existe en ambas refs")
+    if not path.lower().endswith(".dxf"):
+        raise HTTPException(422, "diff visual solo soporta DXF")
+    with _tf.TemporaryDirectory() as td:
+        pa, pb = Path(td) / "a.dxf", Path(td) / "b.dxf"
+        repo.store.get(ta[path]["blob_sha"], pa)
+        repo.store.get(tb[path]["blob_sha"], pb)
+        svg_text = visualdiff.render_diff_svg(pa, pb)
+    return Response(svg_text, media_type="image/svg+xml",
+                    headers={"Cache-Control":
+                             "public, max-age=31536000, immutable"})
+
+
+@app.get("/repos/{name}/render/{file_path:path}")
+def render_version(name: str, file_path: str, ref: str = Query("HEAD")):
+    """SVG de una versión concreta (visor / thumbnail)."""
+    import tempfile as _tf
+    from .. import visualdiff
+    repo = _open_repo(name)
+    tree = repo._tree(repo.resolve(ref))
+    if file_path not in tree:
+        raise HTTPException(404, f"{file_path} no existe en {ref}")
+    if not file_path.lower().endswith(".dxf"):
+        raise HTTPException(422, "render solo soporta DXF")
+    with _tf.TemporaryDirectory() as td:
+        p = Path(td) / "v.dxf"
+        repo.store.get(tree[file_path]["blob_sha"], p)
+        svg_text = visualdiff.render_version_svg(p)
+    return Response(svg_text, media_type="image/svg+xml",
+                    headers={"Cache-Control":
+                             "public, max-age=31536000, immutable"})
+
+
 @app.post("/repos/{name}/merge",
           response_model=S.MergeResponse,
+          dependencies=[Depends(require_editor)],
           responses={409: {"model": S.MergeConflictResponse,
                            "description": "Conflictos de merge"}})
 def merge(name: str, body: S.MergeRequest,
@@ -233,6 +341,7 @@ def merge(name: str, body: S.MergeRequest,
 
 @app.post("/repos/{name}/merge/resolve",
           response_model=S.MergeResponse,
+          dependencies=[Depends(require_editor)],
           responses={409: {"model": S.MergeConflictResponse,
                            "description": "Quedan conflictos sin resolver"}})
 def merge_resolve(name: str, body: S.MergeResolveRequest,
@@ -244,6 +353,34 @@ def merge_resolve(name: str, body: S.MergeResolveRequest,
     conflictivo no cubierto vuelve como 409 con el detalle restante."""
     return _do_merge(name, body.branch, who.username, body.message,
                      resolutions=body.resolutions)
+
+
+@app.post("/repos/{name}/cherry-pick",
+          response_model=S.MergeResponse,
+          responses={409: {"model": S.MergeConflictResponse,
+                           "description": "Conflictos de cherry-pick"}})
+def cherry_pick(name: str, body: S.CherryPickRequest,
+                who: Principal = Depends(get_principal)):
+    with _repo_locks[name]:
+        try:
+            info = _open_repo(name).cherry_pick(
+                body.ref, who.username, body.message,
+                resolutions=body.resolutions)
+        except MergeConflictError as exc:
+            conflicts = {
+                rp: (c if c == "binary" else
+                     [S.EntityConflict(handle=x.handle, dxftype=x.dxftype,
+                                       reason=x.reason, ours=x.ours,
+                                       theirs=x.theirs).model_dump()
+                      for x in c])
+                for rp, c in exc.details.items()}
+            return JSONResponse(status_code=409,
+                                content={"detail": str(exc),
+                                         "conflicts": conflicts})
+        return S.MergeResponse(result=info["result"],
+                               commit_id=info.get("commit_id"),
+                               details=info.get("details"),
+                               author=who.username)
 
 
 # ----------------------------------------------------------- blame
@@ -264,7 +401,8 @@ def list_locks(name: str):
                        expires_at=r["expires_at"]) for r in rows]
 
 
-@app.post("/repos/{name}/locks", response_model=S.LockInfo, status_code=201)
+@app.post("/repos/{name}/locks", response_model=S.LockInfo, status_code=201,
+          dependencies=[Depends(require_editor)])
 def acquire_lock(name: str, body: S.LockRequest,
                  who: Principal = Depends(get_principal)):
     with _repo_locks[name]:
@@ -277,8 +415,11 @@ def acquire_lock(name: str, body: S.LockRequest,
                           expires_at=row["expires_at"])
 
 
-@app.delete("/repos/{name}/locks/{file_path:path}", status_code=204)
+@app.delete("/repos/{name}/locks/{file_path:path}", status_code=204,
+            dependencies=[Depends(require_editor)])
 def release_lock(name: str, file_path: str, force: bool = Query(False),
                  who: Principal = Depends(get_principal)):
+    if force and not who.has_role("admin"):
+        raise HTTPException(403, "force unlock requiere rol admin")
     with _repo_locks[name]:
         _open_repo(name).unlock(file_path, who.username, force=force)

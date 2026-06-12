@@ -84,6 +84,12 @@ class MergeResolveRequest(BaseModel):
                     "clave '__file__' para binarios divergentes completos")
 
 
+class CherryPickRequest(BaseModel):
+    ref: str
+    message: str | None = None
+    resolutions: dict[str, dict[str, str]] = {}
+
+
 class MergeResponse(BaseModel):
     result: str                      # merged | fast-forward | already-up-to-date
     commit_id: int | None = None

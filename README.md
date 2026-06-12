@@ -166,3 +166,16 @@ Sin issuer configurado la API arranca en modo dev sin auth (principal `dev`) con
 ## Blob store en S3/OCI
 
 Los blobs pueden vivir en object storage S3-compatible definiendo `CADVCS_BLOB_URL=s3://bucket/prefijo` (credenciales por la cadena estándar de AWS; `CADVCS_S3_ENDPOINT` para MinIO, OCI Object Storage en modo S3-compat o LocalStack). La interfaz es idéntica al backend local —misma clave SHA-256 con sharding `objects/ab/cdef...`— así que `repo.py` no cambia. El bucket es global: la deduplicación funciona también **entre repositorios** (dos repos con el mismo plano comparten blob). La descarga por la API pasa a streaming desde el store, sin tocar disco intermedio. Suite específica en `test_s3.py` (moto), también en CI.
+## Producción
+
+La metadata puede vivir en **PostgreSQL** definiendo `CADVCS_DB_URL` (formato `postgresql://user:pass@host/db`): un schema por repositorio mantiene el SQL idéntico entre backends y aísla repos entre sí. Sin la variable, cada repo usa su SQLite local como siempre. El wrapper de conexión normaliza paramstyle, `INSERT OR IGNORE`/`ON CONFLICT`, transacciones e ids autogenerados; los timestamps son TEXT UTC en ambos para que la expiración de locks compare igual. Ambas suites corren contra los dos backends en CI.
+
+Despliegue con Docker:
+
+```bash
+cp .env.example .env   # definir POSTGRES_PASSWORD y el issuer OIDC
+docker compose up -d   # PostgreSQL 16 + API con healthchecks
+curl localhost:8000/health
+```
+
+`GET /health` (sin token: es la sonda de Kubernetes/LB) verifica conectividad de metadata y escritura en storage, y reporta el backend activo. La imagen corre como usuario no privilegiado con `HEALTHCHECK` integrado.

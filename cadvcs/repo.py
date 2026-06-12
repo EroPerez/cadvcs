@@ -22,7 +22,7 @@ import tempfile
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from . import db, semdiff, merge as merge_mod
+from . import db, identity, semdiff, merge as merge_mod
 from .storage import BlobStore, open_store
 
 REPO_DIR = ".cadvcs"
@@ -201,21 +201,28 @@ class Repo:
         self._check_locks(changed, author)
 
         parent_id = self.head_commit_id()
+        changed_set = set(changed)
         entries = {}
         for rp in self._tracked():
             fs_path = self.root / rp
             if not fs_path.exists():
                 continue  # borrado: simplemente no entra en el snapshot
+            # Identidad estable: inyectar GUIDs a entidades nuevas de los
+            # DXF que cambiaron (los no cambiados ya los recibieron en su
+            # primer commit; tocarlos los marcaría como modificados)
+            if rp in changed_set and fs_path.suffix.lower() == ".dxf":
+                doc = ezdxf.readfile(fs_path)
+                if identity.ensure_guids(doc):
+                    doc.saveas(fs_path)
             sha, size = self.store.put(fs_path)
             entries[rp] = (sha, size)
             if fs_path.suffix.lower() == ".dxf":
                 self._index_blob(sha, fs_path)
 
         with self.conn:
-            cur = self.conn.execute(
+            cid = self.conn.insert_id(
                 "INSERT INTO commits (parent_id, parent2_id, author, message) "
                 "VALUES (?, ?, ?, ?)", (parent_id, parent2_id, author, message))
-            cid = cur.lastrowid
             self.conn.executemany(
                 "INSERT INTO commit_entries (commit_id, repo_path, blob_sha, "
                 "size_bytes) VALUES (?, ?, ?, ?)",
@@ -261,6 +268,86 @@ class Repo:
                 for r in rows}
 
     # ================================================== branch / tag / switch
+    def branch_delete(self, name: str, force: bool = False):
+        if name == self.current_branch:
+            raise CadVcsError("No se puede borrar la rama actual")
+        row = self.conn.execute(
+            "SELECT head_commit_id FROM branches WHERE name = ?", (name,)
+        ).fetchone()
+        if not row:
+            raise CadVcsError(f"La rama {name} no existe")
+        # Protección estilo git branch -d: no borrar trabajo no mergeado
+        if not force and row["head_commit_id"] is not None:
+            head = self.head_commit_id()
+            if head is None or row["head_commit_id"] not in self._ancestors(head):
+                raise CadVcsError(
+                    f"{name} tiene commits no alcanzables desde "
+                    f"{self.current_branch} (usa force)")
+        with self.conn:
+            self.conn.execute("DELETE FROM branches WHERE name = ?", (name,))
+
+    def tag_delete(self, name: str):
+        with self.conn:
+            cur = self.conn.execute("DELETE FROM tags WHERE name = ?", (name,))
+        if cur.rowcount == 0:
+            raise CadVcsError(f"El tag {name} no existe")
+
+    def gc(self) -> dict:
+        """Mark-and-sweep: elimina commits inalcanzables desde cualquier
+        ref y los blobs/índices que solo ellos referenciaban."""
+        # MARK: alcanzable desde todas las ramas y tags
+        roots = [r["head_commit_id"] for r in self.conn.execute(
+            "SELECT head_commit_id FROM branches "
+            "WHERE head_commit_id IS NOT NULL").fetchall()]
+        roots += [r["commit_id"] for r in self.conn.execute(
+            "SELECT commit_id FROM tags").fetchall()]
+        reachable: set[int] = set()
+        for root in roots:
+            reachable |= self._ancestors(root)
+
+        all_commits = {r["id"] for r in self.conn.execute(
+            "SELECT id FROM commits").fetchall()}
+        dead_commits = all_commits - reachable
+
+        # SWEEP de metadata
+        with self.conn:
+            if dead_commits:
+                marks = ",".join("?" * len(dead_commits))
+                ids = list(dead_commits)
+                self.conn.execute(
+                    f"DELETE FROM commit_entries WHERE commit_id IN ({marks})",
+                    ids)
+                self.conn.execute(
+                    f"DELETE FROM commits WHERE id IN ({marks})", ids)
+        live_blobs = {r["blob_sha"] for r in self.conn.execute(
+            "SELECT DISTINCT blob_sha FROM commit_entries").fetchall()}
+        # Los archivos del workdir actual también están vivos
+        for rp in self._tracked():
+            fs = self.root / rp
+            if fs.exists():
+                live_blobs.add(BlobStore.hash_file(fs))
+
+        # SWEEP de blobs e índice semántico
+        dead_blobs = 0
+        freed = 0
+        for shard in self.store.root.iterdir():
+            if not shard.is_dir():
+                continue
+            for obj in shard.iterdir():
+                sha = shard.name + obj.name
+                if sha not in live_blobs:
+                    freed += obj.stat().st_size
+                    obj.unlink()
+                    dead_blobs += 1
+        if dead_blobs:
+            with self.conn:
+                placeholders = ",".join("?" * len(live_blobs)) or "''"
+                self.conn.execute(
+                    f"DELETE FROM entities WHERE blob_sha NOT IN "
+                    f"({placeholders})", list(live_blobs))
+        return {"commits_removed": len(dead_commits),
+                "blobs_removed": dead_blobs, "bytes_freed": freed}
+
     def branch_create(self, name: str):
         if self.conn.execute("SELECT 1 FROM branches WHERE name = ?",
                              (name,)).fetchone():
@@ -346,12 +433,45 @@ class Repo:
             queue += [p for p in (row["parent_id"], row["parent2_id"]) if p]
         return None
 
-    def log(self, ref: str = "HEAD", limit: int = 50) -> list[dict]:
+    def log(self, ref: str = "HEAD", limit: int = 50,
+            author: str | None = None, path: str | None = None,
+            since: str | None = None, before_id: int | None = None) -> list[dict]:
+        """Historia first-parent con filtros y paginación por cursor.
+
+        author/since filtran por autor y fecha mínima (ISO); path conserva
+        solo commits que TOCARON ese archivo (su blob difiere del padre);
+        before_id es el cursor: continúa por debajo de ese commit.
+        """
         out, cid = [], self.resolve(ref)
+        skipping = before_id is not None
         while cid and len(out) < limit:
             row = self.conn.execute(
                 "SELECT id, parent_id, parent2_id, author, message, created_at "
                 "FROM commits WHERE id = ?", (cid,)).fetchone()
+            if skipping:
+                if row["id"] == before_id:
+                    skipping = False
+                cid = row["parent_id"]
+                continue
+            if author and row["author"] != author:
+                cid = row["parent_id"]
+                continue
+            if since and row["created_at"] < since:
+                break  # first-parent es descendente en el tiempo
+            if path:
+                sha = self.conn.execute(
+                    "SELECT blob_sha FROM commit_entries "
+                    "WHERE commit_id = ? AND repo_path = ?",
+                    (row["id"], path)).fetchone()
+                parent_sha = self.conn.execute(
+                    "SELECT blob_sha FROM commit_entries "
+                    "WHERE commit_id = ? AND repo_path = ?",
+                    (row["parent_id"], path)).fetchone() if row["parent_id"] else None
+                touched = (sha is None) != (parent_sha is None) or (
+                    sha and parent_sha and sha["blob_sha"] != parent_sha["blob_sha"])
+                if not touched:
+                    cid = row["parent_id"]
+                    continue
             d = dict(row)
             d["is_merge"] = row["parent2_id"] is not None
             d["branches"] = [b["name"] for b in self.conn.execute(
@@ -389,36 +509,16 @@ class Repo:
         return out
 
     # ================================================== merge
-    def merge(self, other_branch: str, author: str,
-              message: str | None = None,
-              resolutions: dict[str, dict[str, str]] | None = None) -> dict:
-        """Merge de other_branch en la rama actual.
 
-        `resolutions` permite resolver conflictos de un intento previo:
-        {repo_path: {handle: 'ours'|'theirs'}} para entidades DXF, y la
-        clave especial '__file__' para binarios divergentes completos.
+    def _merge_trees(self, base_id: int | None, ours_id: int,
+                     theirs_id: int,
+                     resolutions: dict[str, dict[str, str]]):
+        """Merge a tres vías de árboles completos sobre el workdir.
+
+        Aplica al workdir los cambios de theirs que no colisionan (y las
+        resoluciones manuales); devuelve (conflicts, details). Compartido
+        por merge() y cherry_pick().
         """
-        resolutions = resolutions or {}
-        ours_id = self.head_commit_id()
-        theirs_id = self.resolve(other_branch)
-        if ours_id is None:
-            raise CadVcsError("La rama actual no tiene commits")
-        if self.is_dirty():
-            raise CadVcsError("Workdir sucio: commitea o descarta antes de merge")
-        if theirs_id == ours_id or theirs_id in self._ancestors(ours_id):
-            return {"result": "already-up-to-date"}
-
-        base_id = self.merge_base(ours_id, theirs_id)
-
-        # Fast-forward: ours es ancestro de theirs
-        if base_id == ours_id:
-            with self.conn:
-                self.conn.execute(
-                    "UPDATE branches SET head_commit_id = ? WHERE name = ?",
-                    (theirs_id, self.current_branch))
-            self.switch(self.current_branch, force=True)  # rematerializar
-            return {"result": "fast-forward", "commit_id": theirs_id}
-
         base_t = self._tree(base_id)
         ours_t = self._tree(ours_id)
         theirs_t = self._tree(theirs_id)
@@ -426,6 +526,7 @@ class Repo:
         merge_details: dict[str, str] = {}
 
         for rp in sorted(set(base_t) | set(ours_t) | set(theirs_t)):
+
             b = base_t.get(rp, {}).get("blob_sha")
             o = ours_t.get(rp, {}).get("blob_sha")
             t = theirs_t.get(rp, {}).get("blob_sha")
@@ -459,6 +560,14 @@ class Repo:
                     res = merge_mod.merge_dxf(pb, po, pt, self.root / rp,
                                               resolutions.get(rp))
                 if res.ok:
+                    applied = (res.applied_modified + res.applied_added +
+                               res.applied_deleted + res.resolved)
+                    if applied == 0:
+                        # Convergencia total: nada que traer de theirs.
+                        # Restaurar los bytes exactos de ours para no
+                        # generar un commit no-op por el re-save del DXF.
+                        self.store.get(o, self.root / rp)
+                        continue
                     merge_details[rp] = res.summary()
                 else:
                     conflicts[rp] = res.conflicts
@@ -483,6 +592,40 @@ class Repo:
                     merge_details[rp] = "theirs (resolución manual)"
                 else:
                     conflicts[rp] = "binary"      # requiere resolución manual
+        return conflicts, merge_details
+
+    def merge(self, other_branch: str, author: str,
+              message: str | None = None,
+              resolutions: dict[str, dict[str, str]] | None = None) -> dict:
+        """Merge de other_branch en la rama actual.
+
+        `resolutions` permite resolver conflictos de un intento previo:
+        {repo_path: {handle: 'ours'|'theirs'}} para entidades DXF, y la
+        clave especial '__file__' para binarios divergentes completos.
+        """
+        resolutions = resolutions or {}
+        ours_id = self.head_commit_id()
+        theirs_id = self.resolve(other_branch)
+        if ours_id is None:
+            raise CadVcsError("La rama actual no tiene commits")
+        if self.is_dirty():
+            raise CadVcsError("Workdir sucio: commitea o descarta antes de merge")
+        if theirs_id == ours_id or theirs_id in self._ancestors(ours_id):
+            return {"result": "already-up-to-date"}
+
+        base_id = self.merge_base(ours_id, theirs_id)
+
+        # Fast-forward: ours es ancestro de theirs
+        if base_id == ours_id:
+            with self.conn:
+                self.conn.execute(
+                    "UPDATE branches SET head_commit_id = ? WHERE name = ?",
+                    (theirs_id, self.current_branch))
+            self.switch(self.current_branch, force=True)  # rematerializar
+            return {"result": "fast-forward", "commit_id": theirs_id}
+
+        conflicts, merge_details = self._merge_trees(
+            base_id, ours_id, theirs_id, resolutions)
 
         if conflicts:
             # Restaurar workdir al estado de ours
@@ -498,50 +641,116 @@ class Repo:
         info["details"] = merge_details
         return info
 
+    def cherry_pick(self, ref: str, author: str,
+                    message: str | None = None,
+                    resolutions: dict[str, dict[str, str]] | None = None) -> dict:
+        """Aplica los cambios de UN commit sobre la rama actual.
+
+        Tres vías con base = primer padre del commit elegido y theirs =
+        el commit; el resultado es un commit normal (un solo padre) en
+        la rama actual. Conflictos y resoluciones funcionan igual que en
+        merge. Para merge commits se usa el primer padre como mainline.
+        """
+        resolutions = resolutions or {}
+        ours_id = self.head_commit_id()
+        if ours_id is None:
+            raise CadVcsError("La rama actual no tiene commits")
+        if self.is_dirty():
+            raise CadVcsError(
+                "Workdir sucio: commitea o descarta antes de cherry-pick")
+        theirs_id = self.resolve(ref)
+        row = self.conn.execute(
+            "SELECT parent_id, message FROM commits WHERE id = ?",
+            (theirs_id,)).fetchone()
+        base_id = row["parent_id"]
+        if base_id is None:
+            raise CadVcsError(
+                "No se puede aplicar cherry-pick de un commit raíz")
+
+        conflicts, details = self._merge_trees(
+            base_id, ours_id, theirs_id, resolutions)
+
+        if conflicts:
+            self.switch(self.current_branch, force=True)
+            raise MergeConflictError(
+                f"Cherry-pick con conflictos en {len(conflicts)} archivo(s)",
+                conflicts)
+        if not details:
+            return {"result": "empty", "commit_id": None,
+                    "details": {}}
+
+        info = self.commit(
+            author=author,
+            message=message or
+            f"{row['message']} (cherry picked from c{theirs_id})")
+        info["result"] = "cherry-picked"
+        info["details"] = details
+        return info
+
     # ================================================== blame
     def blame(self, repo_path: str, ref: str = "HEAD") -> list[dict]:
-        """Para cada entidad de la versión actual: último commit que la tocó.
+        """Para cada entidad de la versión en ref: el commit que la dejó
+        en su estado actual.
 
-        Recorre la cadena first-parent desde ref hacia atrás; una entidad se
-        atribuye al commit donde su fingerprint difiere del padre (o aparece).
+        Desciende por el DAG completo (no solo first-parent): desde ref,
+        para cada uid se sigue al padre cuya versión tiene el MISMO
+        fingerprint; cuando ningún padre coincide (cambió respecto a
+        todos, o no existe en ninguno), ese commit es el responsable.
+        Gracias a los GUIDs, una entidad creada en una rama y fusionada
+        conserva su identidad y se atribuye a su commit de origen, no al
+        merge commit.
         """
         if not repo_path.lower().endswith(".dxf"):
             raise CadVcsError("blame solo soporta DXF")
-        chain = self.log(ref, limit=10_000)
-        current_sha = None
-        for c in chain:
-            tree = self._tree(c["id"])
-            if repo_path in tree:
-                current_sha = tree[repo_path]["blob_sha"]
-                break
-        if current_sha is None:
+        head_id = self.resolve(ref)
+
+        def file_entities(commit_id: int | None) -> dict[str, dict]:
+            if commit_id is None:
+                return {}
+            sha = self._tree(commit_id).get(repo_path, {}).get("blob_sha")
+            return self._entities_for_blob(sha) if sha else {}
+
+        def parents(commit_id: int) -> list[int]:
+            row = self.conn.execute(
+                "SELECT parent_id, parent2_id FROM commits WHERE id = ?",
+                (commit_id,)).fetchone()
+            return [p for p in (row["parent_id"], row["parent2_id"]) if p]
+
+        def commit_info(commit_id: int) -> dict:
+            row = self.conn.execute(
+                "SELECT id, author, message FROM commits WHERE id = ?",
+                (commit_id,)).fetchone()
+            return {"commit_id": row["id"], "author": row["author"],
+                    "message": row["message"]}
+
+        current = file_entities(head_id)
+        if not current:
             raise CadVcsError(f"{repo_path} no existe en {ref}")
 
-        current = self._entities_for_blob(current_sha)
+        ents_cache: dict[int, dict] = {head_id: current}
+
+        def ents(cid: int) -> dict:
+            if cid not in ents_cache:
+                ents_cache[cid] = file_entities(cid)
+            return ents_cache[cid]
+
         attribution: dict[str, dict] = {}
-        pending = set(current)
+        for uid, record in current.items():
+            cid, fp = head_id, record["fingerprint"]
+            seen = set()
+            while True:
+                seen.add(cid)
+                nxt = None
+                for p in parents(cid):
+                    pe = ents(p).get(uid)
+                    if pe and pe["fingerprint"] == fp and p not in seen:
+                        nxt = p
+                        break
+                if nxt is None:
+                    attribution[uid] = commit_info(cid)
+                    break
+                cid = nxt
 
-        for i, c in enumerate(chain):
-            if not pending:
-                break
-            tree = self._tree(c["id"])
-            parent_tree = self._tree(chain[i + 1]["id"]) if i + 1 < len(chain) else {}
-            sha = tree.get(repo_path, {}).get("blob_sha")
-            psha = parent_tree.get(repo_path, {}).get("blob_sha")
-            if sha is None:
-                continue
-            ents = self._entities_for_blob(sha)
-            pents = self._entities_for_blob(psha) if psha else {}
-            for h in list(pending):
-                if h not in ents:
-                    continue
-                changed_here = (h not in pents or
-                                pents[h]["fingerprint"] != ents[h]["fingerprint"])
-                if changed_here:
-                    attribution[h] = {"commit_id": c["id"], "author": c["author"],
-                                      "message": c["message"]}
-                    pending.discard(h)
-
-        return [{"handle": h, "dxftype": current[h]["dxftype"],
-                 "layer": current[h]["layer"], **attribution.get(h, {})}
-                for h in sorted(current)]
+        return [{"handle": uid, "dxftype": current[uid]["dxftype"],
+                 "layer": current[uid]["layer"], **attribution[uid]}
+                for uid in sorted(current)]

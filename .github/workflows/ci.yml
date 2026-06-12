@@ -6,7 +6,7 @@ on:
   pull_request:
 
 jobs:
-  test:
+  test-sqlite:
     runs-on: ubuntu-latest
     strategy:
       matrix:
@@ -22,6 +22,38 @@ jobs:
         run: python demo.py
       - name: API end-to-end
         run: python test_api.py
-
       - name: S3 blob store end-to-end (moto)
         run: python test_s3.py
+  test-postgres:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: cadvcs
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s --health-timeout 3s --health-retries 10
+    env:
+      CADVCS_DB_URL: postgresql://postgres:postgres@localhost:5432/cadvcs
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install
+        run: pip install -e ".[dev]" "psycopg[binary]>=3.1"
+      - name: Core demo against PostgreSQL
+        run: python demo.py
+      - name: API end-to-end against PostgreSQL
+        run: python test_api.py
+
+  docker-build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build image
+        run: docker build -t cadvcs:ci .
