@@ -2,6 +2,12 @@
 
 Versionado para archivos CAD (DXF/DWG) con modelo Git completo: DAG de commits multi-archivo, branches, tags, merge a tres vías con **resolución a nivel de entidad DXF**, blame por entidad, y pessimistic locking para binarios no mergeables.
 
+## Arquitectura de producción
+
+![Arquitectura de producción](docs/architecture.svg)
+
+Detalle completo en [ARCHITECTURE.md](ARCHITECTURE.md). Las specs de cada funcionalidad implementada y el backlog de mejoras están en [docs/](docs/).
+
 ## Arquitectura del código
 
 ```
