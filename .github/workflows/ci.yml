@@ -22,3 +22,6 @@ jobs:
         run: python demo.py
       - name: API end-to-end
         run: python test_api.py
+
+      - name: S3 blob store end-to-end (moto)
+        run: python test_s3.py

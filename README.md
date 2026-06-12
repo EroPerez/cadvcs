@@ -162,3 +162,7 @@ uvicorn cadvcs.api.main:app
 ```
 
 Sin issuer configurado la API arranca en modo dev sin auth (principal `dev`) con warning explícito. El test suite genera su propio par RSA y JWKS, firma tokens reales para dos usuarios y cubre los 401 (sin token, firma ajena, expirado, audience incorrecta) además del flujo completo de resolución.
+
+## Blob store en S3/OCI
+
+Los blobs pueden vivir en object storage S3-compatible definiendo `CADVCS_BLOB_URL=s3://bucket/prefijo` (credenciales por la cadena estándar de AWS; `CADVCS_S3_ENDPOINT` para MinIO, OCI Object Storage en modo S3-compat o LocalStack). La interfaz es idéntica al backend local —misma clave SHA-256 con sharding `objects/ab/cdef...`— así que `repo.py` no cambia. El bucket es global: la deduplicación funciona también **entre repositorios** (dos repos con el mismo plano comparten blob). La descarga por la API pasa a streaming desde el store, sin tocar disco intermedio. Suite específica en `test_s3.py` (moto), también en CI.

@@ -23,7 +23,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from . import db, semdiff, merge as merge_mod
-from .storage import BlobStore
+from .storage import BlobStore, open_store
 
 REPO_DIR = ".cadvcs"
 DEFAULT_BRANCH = "main"
@@ -54,7 +54,7 @@ class Repo:
         self.vcs_dir = self.root / REPO_DIR
         if not self.vcs_dir.exists():
             raise CadVcsError(f"No hay repo en {self.root} (ejecuta init)")
-        self.store = BlobStore(self.vcs_dir / "objects")
+        self.store = open_store(self.vcs_dir / "objects")
         self.conn = db.connect(self.vcs_dir / "metadata.db")
 
     @classmethod
