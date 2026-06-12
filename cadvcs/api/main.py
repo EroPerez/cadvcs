@@ -173,6 +173,24 @@ def switch(name: str, body: S.SwitchRequest):
         return _repo_info(repo, name)
 
 
+@app.delete("/repos/{name}/branches/{branch}", status_code=204)
+def delete_branch(name: str, branch: str, force: bool = Query(False)):
+    with _repo_locks[name]:
+        _open_repo(name).branch_delete(branch, force=force)
+
+
+@app.delete("/repos/{name}/tags/{tag}", status_code=204)
+def delete_tag(name: str, tag: str):
+    with _repo_locks[name]:
+        _open_repo(name).tag_delete(tag)
+
+
+@app.post("/repos/{name}/gc")
+def run_gc(name: str):
+    with _repo_locks[name]:
+        return _open_repo(name).gc()
+
+
 @app.get("/repos/{name}/tags", response_model=list[S.TagInfo])
 def tags(name: str):
     return _open_repo(name).tags()
