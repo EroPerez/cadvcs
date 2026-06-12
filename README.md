@@ -1,0 +1,129 @@
+# cadvcs — Control de versiones tipo Git para archivos CAD
+
+Versionado para archivos CAD (DXF/DWG) con modelo Git completo: DAG de commits multi-archivo, branches, tags, merge a tres vías con **resolución a nivel de entidad DXF**, blame por entidad, y pessimistic locking para binarios no mergeables.
+
+## Arquitectura del código
+
+```
+cadvcs/
+├── storage.py   Blob store content-addressed (SHA-256, layout objects/ab/cd...)
+├── db.py        Esquema tipo Git: commits (DAG), commit_entries (tree plano),
+│                branches/tags (refs), locks (TTL), entities (índice por blob)
+├── semdiff.py   Extracción y diff semántico DXF: identidad por handle
+├── merge.py     Merge a 3 vías por entidad: clasifica cambios vs merge-base,
+│                auto-fusiona lo que no colisiona, reporta conflictos reales
+├── repo.py      API: add/status/commit/log/branch/switch/tag/diff/merge/blame
+└── cli.py       CLI con comandos tipo Git
+```
+
+## Capacidades tipo Git
+
+```bash
+cadvcs init                          # crea rama main
+cadvcs add plano.dxf                 # tracking
+cadvcs status                        # A/M/D vs HEAD
+cadvcs commit --user ero -m "..."    # changeset multi-archivo, nodo del DAG
+cadvcs log                           # first-parent, con decoraciones (ramas, tags)
+cadvcs branch variante-b             # refs baratas (puntero a commit)
+cadvcs switch variante-b             # materializa el árbol destino en el workdir
+cadvcs diff main variante-b          # tree-level + semántico por entidad en DXF
+cadvcs merge variante-b --user ero   # 3 vías con merge-base (LCA del DAG)
+cadvcs tag v1.0
+cadvcs blame plano.dxf               # último commit que tocó cada entidad
+cadvcs lock plano.dxf --user ero     # pesimista, para binarios no mergeables
+cadvcs checkout plano.dxf --ref v1.0 --out plano_v1.dxf
+```
+
+## El merge a nivel de entidad
+
+La pieza diferencial. Con base = merge-base(ours, theirs), cada handle DXF se clasifica en cada lado como unchanged/modified/added/deleted:
+
+- Cambios en **entidades distintas** se fusionan automáticamente (maria movió la columna en su rama, ero añadió una puerta en main → el merge produce un DXF con ambas cosas).
+- Colisiones reales se reportan como conflictos estructurados sin auto-resolver: modify/modify sobre el mismo handle, modify/delete, y add/add con el mismo handle (los handles DXF son por-archivo y dos ramas pueden asignar el mismo a entidades nuevas distintas).
+- Fast-forward y already-up-to-date se detectan igual que en Git.
+
+```
+merge variante-b → main: merged c4
+  plano.dxf: auto-merge: ~1 +0 -0
+
+merge propuesta-x → main:
+  CONFLICTO plano.dxf: modify/modify CIRCLE handle=31
+    ours:   center=(90.0, 40.0, 0.0)
+    theirs: center=(10.0, 10.0, 0.0)
+```
+
+Limitación documentada: las entidades importadas desde theirs reciben handle nuevo en el doc fusionado (identidad histórica reiniciada). Los PDM comerciales lo resuelven con GUIDs propios por entidad.
+
+## Decisiones de diseño
+
+1. **Tree plano por commit** en vez de objetos tree jerárquicos: cada commit lista (repo_path, blob_sha). Con content-addressing, los archivos sin cambios reutilizan el mismo blob — snapshot completo barato, modelo mental simple.
+2. **Índice semántico por blob, no por revisión**: la tabla `entities` se indexa una vez por SHA único. diff/merge/blame entre versiones históricas nunca re-parsean DXF.
+3. **Locking pesimista como complemento, no sustituto**: el merge por entidad cubre DXF; para DWG/binarios divergentes el merge se rechaza y el lock es la protección.
+4. **blame por fingerprint**: recorre la cadena first-parent y atribuye cada entidad al commit donde su fingerprint cambió respecto al padre.
+
+## Uso por API
+
+```python
+from cadvcs.repo import Repo, MergeConflictError
+
+repo = Repo.init("/proyectos/nave")
+repo.add(path)
+repo.commit("ero", "Planta inicial")
+repo.branch_create("variante-b"); repo.switch("variante-b")
+# ... editar y commitear ...
+repo.switch("main")
+try:
+    info = repo.merge("variante-b", author="ero")
+except MergeConflictError as e:
+    for path, conflicts in e.details.items(): ...
+```
+
+Demo completa (`python demo.py`): dos usuarios, dos ramas, merge automático verificado con asserts, conflicto modify/modify, restauración del workdir, log y blame.
+
+## Producción
+
+Ver **ARCHITECTURE.md**: API REST + PostgreSQL + S3/OCI con presigned URLs, workers Kafka (indexado, conversión DWG→DXF con ODA, render para diff visual), transactional outbox, locking con heartbeat desde el plugin AutoCAD, grafo de XREFs, multi-tenancy con RLS y gc de blobs estilo `git gc`.
+
+## API REST (FastAPI)
+
+La API expone el mismo `repo.py` por HTTP, con working copy server-side por repositorio bajo `CADVCS_DATA`. Endpoints síncronos en threadpool + un lock por repo serializando mutaciones (SQLite WAL con `busy_timeout`); en producción ese lock se sustituye por transacciones PostgreSQL.
+
+```bash
+pip install -r requirements.txt
+uvicorn cadvcs.api.main:app --reload     # docs en http://localhost:8000/docs
+```
+
+```
+POST   /repos                          crear repo            → 201
+GET    /repos | /repos/{name}          listar / info
+PUT    /repos/{n}/files/{path}         subir a working copy (octet-stream)
+GET    /repos/{n}/files/{path}?ref=    descargar blob de cualquier ref
+GET    /repos/{n}/status               A/M/D vs HEAD
+POST   /repos/{n}/commits              {author, message}     → 201 | 422 | 423
+GET    /repos/{n}/commits?ref=&limit=  log decorado
+POST   /repos/{n}/branches | GET       crear / listar ramas
+POST   /repos/{n}/switch               {branch, force}
+POST   /repos/{n}/tags | GET           crear / listar tags
+GET    /repos/{n}/diff?ref_a=&ref_b=   tree-level + semántico por entidad
+POST   /repos/{n}/merge                {branch, author}      → 200 | 409
+GET    /repos/{n}/blame/{path}?ref=    atribución por entidad
+POST   /repos/{n}/locks | GET          adquirir / listar     → 201 | 423
+DELETE /repos/{n}/locks/{path}?owner=  liberar               → 204
+```
+
+Semántica HTTP: 409 para conflictos de merge con payload estructurado (handle, razón, ours/theirs), 423 Locked para locks ajenos, 422 para errores de dominio (commit vacío, ref inexistente). El conflicto 409 devuelve exactamente lo que una UI de resolución necesita:
+
+```json
+{
+  "detail": "Merge con conflictos en 1 archivo(s)",
+  "conflicts": {
+    "plano.dxf": [{
+      "handle": "31", "dxftype": "CIRCLE", "reason": "modify/modify",
+      "ours":   {"attrs": {"center": [90.0, 40.0, 0.0]}},
+      "theirs": {"attrs": {"center": [10.0, 10.0, 0.0]}}
+    }]
+  }
+}
+```
+
+Seguridad MVP: validación de slug de repo, guard anti path-traversal en rutas de archivo (incluida la forma URL-encoded), y la dir `.cadvcs` inaccesible vía API. Test end-to-end en `test_api.py` (24 checks: flujo completo de ramas y merge vía HTTP, 409 estructurado, 423 de locks, descarga histórica).
