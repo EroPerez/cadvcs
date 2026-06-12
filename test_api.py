@@ -197,7 +197,6 @@ for c in msp.query("CIRCLE"):
     c.dxf.center = (2, 2)
 line = list(msp.query("LINE"))[0]
 line.dxf.end = (200, 0)
-line_handle = line.dxf.handle
 put_dxf(doc, MARIA)
 client.post("/repos/nave/commits", json={"message": "círculo y muro"},
             headers=MARIA)
@@ -215,6 +214,9 @@ client.post("/repos/nave/commits", json={"message": "círculo y muro v2"},
 r = client.post("/repos/nave/merge", json={"branch": "propuesta-3"}, headers=ERO)
 check("dos conflictos detectados",
       r.status_code == 409 and len(r.json()["conflicts"]["plano.dxf"]) == 2)
+# La identidad ahora es el GUID del payload, no el handle DXF crudo
+line_handle = next(c["handle"] for c in r.json()["conflicts"]["plano.dxf"]
+                   if c["dxftype"] == "LINE")
 
 r = client.post("/repos/nave/merge/resolve",
                 json={"branch": "propuesta-3",

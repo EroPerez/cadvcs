@@ -28,6 +28,7 @@ from pathlib import Path
 import ezdxf
 from ezdxf.addons import Importer
 
+from .identity import copy_uid, entity_uid
 from .semdiff import extract_entities
 
 UNCHANGED, MODIFIED, ADDED, DELETED = "unchanged", "modified", "added", "deleted"
@@ -181,28 +182,31 @@ def merge_dxf(base_path: Path, ours_path: Path, theirs_path: Path,
     # --- Aplicar deltas de theirs sobre el documento de ours -------------
     ours_doc = ezdxf.readfile(str(ours_path))
     msp = ours_doc.modelspace()
-    by_handle = {e.dxf.handle: e for e in msp}
+    by_uid = {entity_uid(e): e for e in msp}
 
     for h in to_modify:
-        if h in by_handle:
-            _apply_attrs(by_handle[h], theirs[h]["attrs"])
+        if h in by_uid:
+            _apply_attrs(by_uid[h], theirs[h]["attrs"])
             result.applied_modified += 1
 
     for h in to_delete:
-        if h in by_handle:
-            msp.delete_entity(by_handle[h])
+        if h in by_uid:
+            msp.delete_entity(by_uid[h])
             result.applied_deleted += 1
 
     if to_add:
         theirs_doc = ezdxf.readfile(str(theirs_path))
-        src_by_handle = {e.dxf.handle: e for e in theirs_doc.modelspace()}
+        src_by_uid = {entity_uid(e): e for e in theirs_doc.modelspace()}
+        sources = [src_by_uid[h] for h in to_add if h in src_by_uid]
         importer = Importer(theirs_doc, ours_doc)
-        importer.import_entities(
-            [src_by_handle[h] for h in to_add if h in src_by_handle],
-            ours_doc.modelspace(),
-        )
+        importer.import_entities(sources, ours_doc.modelspace())
         importer.finalize()  # arrastra layers/linetypes/estilos necesarios
-        result.applied_added += len(to_add)
+        # El Importer descarta XDATA: re-aplicar el GUID para que la
+        # identidad de la entidad sobreviva al merge (clave para blame)
+        imported = list(msp)[-len(sources):]
+        for original, copy in zip(sources, imported):
+            copy_uid(original, copy, ours_doc)
+        result.applied_added += len(sources)
 
     ours_doc.saveas(str(out_path))
     result.merged_path = Path(out_path)

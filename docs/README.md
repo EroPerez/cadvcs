@@ -14,6 +14,7 @@
 | 08 | [CLI](specs/08-cli.md) | `cli.py` |
 | 09 | [API REST](specs/09-rest-api.md) | `api/main.py` |
 | 10 | [Autenticación OIDC](specs/10-auth-oidc.md) | `api/auth.py` |
+| 11 | [Identidad de entidad por GUID](specs/11-entity-guids.md) | `identity.py` |
 
 ## Otros documentos
 

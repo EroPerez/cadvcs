@@ -19,6 +19,8 @@ from pathlib import Path
 
 import ezdxf
 
+from .identity import entity_uid
+
 # Atributos que ignoramos: ruido interno que no representa un cambio de diseño
 _IGNORED_ATTRS = {"handle", "owner", "reactors", "material_handle", "plotstyle_handle"}
 
@@ -47,16 +49,23 @@ def _fingerprint(attrs: dict) -> str:
 
 
 def extract_entities(dxf_path: Path) -> dict[str, dict]:
-    """Devuelve {handle: {dxftype, layer, fingerprint, attrs}} del modelspace."""
+    """Devuelve {uid: {dxftype, layer, fingerprint, attrs, handle}}.
+
+    El uid es el GUID CADVCS de la entidad (identidad estable a través
+    de branches y merges) con fallback al handle para blobs legacy. El
+    handle real del documento viaja en el registro para que el merge
+    pueda localizar la entidad en su doc concreto.
+    """
     doc = ezdxf.readfile(str(dxf_path))
     result = {}
     for entity in doc.modelspace():
         attrs = _entity_attrs(entity)
-        result[entity.dxf.handle] = {
+        result[entity_uid(entity)] = {
             "dxftype": entity.dxftype(),
             "layer": entity.dxf.get("layer", "0"),
             "fingerprint": _fingerprint(attrs),
             "attrs": attrs,
+            "handle": entity.dxf.handle,
         }
     return result
 
