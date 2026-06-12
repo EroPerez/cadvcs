@@ -29,7 +29,8 @@ from .. import semdiff
 from ..repo import Repo, CadVcsError, LockError, MergeConflictError, REPO_DIR
 from ..storage import BlobStore
 from . import schemas as S
-from .auth import Principal, get_principal
+from .auth import (Principal, get_principal, require_admin,
+                   require_editor, require_viewer)
 
 DATA_DIR = Path(os.environ.get("CADVCS_DATA", "./cadvcs-data")).resolve()
 DATA_DIR.mkdir(parents=True, exist_ok=True)
@@ -41,7 +42,7 @@ app = FastAPI(
     version="0.4.0",
     description="Control de versiones tipo Git para archivos CAD "
                 "con merge a nivel de entidad DXF y auth OIDC",
-    dependencies=[Depends(get_principal)],   # toda la API requiere JWT válido
+    dependencies=[Depends(require_viewer)],  # JWT válido + rol viewer mínimo
 )
 
 
@@ -80,7 +81,8 @@ def _cadvcs_error(request: Request, exc: CadVcsError):
 
 
 # ----------------------------------------------------------- repos
-@app.post("/repos", response_model=S.RepoInfo, status_code=201)
+@app.post("/repos", response_model=S.RepoInfo, status_code=201,
+          dependencies=[Depends(require_editor)])
 def create_repo(body: S.RepoCreate):
     root = _repo_root(body.name)
     if (root / REPO_DIR).exists():
@@ -104,7 +106,8 @@ def get_repo(name: str):
 
 
 # ----------------------------------------------------------- archivos
-@app.put("/repos/{name}/files/{file_path:path}", response_model=S.UploadResponse)
+@app.put("/repos/{name}/files/{file_path:path}", response_model=S.UploadResponse,
+         dependencies=[Depends(require_editor)])
 def upload_file(name: str, file_path: str, body: bytes = Body(media_type="application/octet-stream")):
     """Sube contenido a la working copy y lo marca como tracked."""
     with _repo_locks[name]:
@@ -137,7 +140,8 @@ def status(name: str):
     return S.StatusResponse(branch=repo.current_branch, **repo.status())
 
 
-@app.post("/repos/{name}/commits", response_model=S.CommitInfo, status_code=201)
+@app.post("/repos/{name}/commits", response_model=S.CommitInfo, status_code=201,
+          dependencies=[Depends(require_editor)])
 def commit(name: str, body: S.CommitRequest,
            who: Principal = Depends(get_principal)):
     with _repo_locks[name]:
@@ -156,7 +160,8 @@ def branches(name: str):
     return _open_repo(name).branches()
 
 
-@app.post("/repos/{name}/branches", response_model=S.BranchInfo, status_code=201)
+@app.post("/repos/{name}/branches", response_model=S.BranchInfo, status_code=201,
+          dependencies=[Depends(require_editor)])
 def create_branch(name: str, body: S.BranchCreate):
     with _repo_locks[name]:
         repo = _open_repo(name)
@@ -165,7 +170,8 @@ def create_branch(name: str, body: S.BranchCreate):
                             current=False)
 
 
-@app.post("/repos/{name}/switch", response_model=S.RepoInfo)
+@app.post("/repos/{name}/switch", response_model=S.RepoInfo,
+          dependencies=[Depends(require_editor)])
 def switch(name: str, body: S.SwitchRequest):
     with _repo_locks[name]:
         repo = _open_repo(name)
@@ -178,7 +184,8 @@ def tags(name: str):
     return _open_repo(name).tags()
 
 
-@app.post("/repos/{name}/tags", response_model=S.TagInfo, status_code=201)
+@app.post("/repos/{name}/tags", response_model=S.TagInfo, status_code=201,
+          dependencies=[Depends(require_editor)])
 def create_tag(name: str, body: S.TagCreate):
     with _repo_locks[name]:
         repo = _open_repo(name)
@@ -221,6 +228,7 @@ def _do_merge(name: str, branch: str, author: str, message: str | None,
 
 @app.post("/repos/{name}/merge",
           response_model=S.MergeResponse,
+          dependencies=[Depends(require_editor)],
           responses={409: {"model": S.MergeConflictResponse,
                            "description": "Conflictos de merge"}})
 def merge(name: str, body: S.MergeRequest,
@@ -230,6 +238,7 @@ def merge(name: str, body: S.MergeRequest,
 
 @app.post("/repos/{name}/merge/resolve",
           response_model=S.MergeResponse,
+          dependencies=[Depends(require_editor)],
           responses={409: {"model": S.MergeConflictResponse,
                            "description": "Quedan conflictos sin resolver"}})
 def merge_resolve(name: str, body: S.MergeResolveRequest,
@@ -261,7 +270,8 @@ def list_locks(name: str):
                        expires_at=r["expires_at"]) for r in rows]
 
 
-@app.post("/repos/{name}/locks", response_model=S.LockInfo, status_code=201)
+@app.post("/repos/{name}/locks", response_model=S.LockInfo, status_code=201,
+          dependencies=[Depends(require_editor)])
 def acquire_lock(name: str, body: S.LockRequest,
                  who: Principal = Depends(get_principal)):
     with _repo_locks[name]:
@@ -274,8 +284,11 @@ def acquire_lock(name: str, body: S.LockRequest,
                           expires_at=row["expires_at"])
 
 
-@app.delete("/repos/{name}/locks/{file_path:path}", status_code=204)
+@app.delete("/repos/{name}/locks/{file_path:path}", status_code=204,
+            dependencies=[Depends(require_editor)])
 def release_lock(name: str, file_path: str, force: bool = Query(False),
                  who: Principal = Depends(get_principal)):
+    if force and not who.has_role("admin"):
+        raise HTTPException(403, "force unlock requiere rol admin")
     with _repo_locks[name]:
         _open_repo(name).unlock(file_path, who.username, force=force)

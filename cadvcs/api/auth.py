@@ -36,6 +36,12 @@ AUDIENCE = os.environ.get("CADVCS_OIDC_AUDIENCE", "cadvcs")
 JWKS_URL = os.environ.get("CADVCS_OIDC_JWKS_URL")
 JWKS_FILE = os.environ.get("CADVCS_OIDC_JWKS_FILE")
 
+ROLE_CLAIM = os.environ.get("CADVCS_ROLE_CLAIM", "roles")
+# Roles asumidos cuando el token no trae el claim. Default 'editor' por
+# compatibilidad; en producción fijar CADVCS_DEFAULT_ROLES="" (deny).
+DEFAULT_ROLES = [r for r in
+                 os.environ.get("CADVCS_DEFAULT_ROLES", "editor").split(",") if r]
+
 AUTH_ENABLED = bool(ISSUER or JWKS_URL or JWKS_FILE)
 if not AUTH_ENABLED:
     logger.warning("Auth OIDC deshabilitada (sin CADVCS_OIDC_ISSUER): "
@@ -44,10 +50,30 @@ if not AUTH_ENABLED:
 _bearer = HTTPBearer(auto_error=False)
 
 
+ROLE_ORDER = {"viewer": 0, "editor": 1, "admin": 2}
+
+
 class Principal(BaseModel):
     sub: str
     username: str
     email: str | None = None
+    roles: list[str] = []
+
+    def has_role(self, role: str) -> bool:
+        """Jerárquico: admin ⊇ editor ⊇ viewer."""
+        need = ROLE_ORDER[role]
+        return any(ROLE_ORDER.get(r, -1) >= need for r in self.roles)
+
+
+def _extract_roles(claims: dict) -> list[str]:
+    """Soporta claim plano ('roles') o anidado estilo Keycloak
+    ('realm_access.roles') vía notación con puntos en CADVCS_ROLE_CLAIM."""
+    node = claims
+    for part in ROLE_CLAIM.split("."):
+        if not isinstance(node, dict) or part not in node:
+            return list(DEFAULT_ROLES)
+        node = node[part]
+    return list(node) if isinstance(node, list) else list(DEFAULT_ROLES)
 
 
 @functools.lru_cache(maxsize=1)
@@ -81,7 +107,7 @@ def get_principal(
 ) -> Principal:
     """Dependencia FastAPI: valida el Bearer JWT y devuelve el principal."""
     if not AUTH_ENABLED:
-        return Principal(sub="dev", username="dev")
+        return Principal(sub="dev", username="dev", roles=["admin"])
 
     if creds is None:
         raise HTTPException(401, "Falta el header Authorization: Bearer",
@@ -102,4 +128,19 @@ def get_principal(
     username = (claims.get("preferred_username") or claims.get("email")
                 or claims["sub"])
     return Principal(sub=claims["sub"], username=username,
-                     email=claims.get("email"))
+                     email=claims.get("email"), roles=_extract_roles(claims))
+
+
+def require_role(role: str):
+    """Factory de dependencias: Depends(require_role('editor'))."""
+    def checker(who: Principal = Depends(get_principal)) -> Principal:
+        if not who.has_role(role):
+            raise HTTPException(
+                403, f"Requiere rol {role} (roles del token: {who.roles})")
+        return who
+    return checker
+
+
+require_viewer = require_role("viewer")
+require_editor = require_role("editor")
+require_admin = require_role("admin")
