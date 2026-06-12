@@ -502,36 +502,16 @@ class Repo:
         return out
 
     # ================================================== merge
-    def merge(self, other_branch: str, author: str,
-              message: str | None = None,
-              resolutions: dict[str, dict[str, str]] | None = None) -> dict:
-        """Merge de other_branch en la rama actual.
 
-        `resolutions` permite resolver conflictos de un intento previo:
-        {repo_path: {handle: 'ours'|'theirs'}} para entidades DXF, y la
-        clave especial '__file__' para binarios divergentes completos.
+    def _merge_trees(self, base_id: int | None, ours_id: int,
+                     theirs_id: int,
+                     resolutions: dict[str, dict[str, str]]):
+        """Merge a tres vías de árboles completos sobre el workdir.
+
+        Aplica al workdir los cambios de theirs que no colisionan (y las
+        resoluciones manuales); devuelve (conflicts, details). Compartido
+        por merge() y cherry_pick().
         """
-        resolutions = resolutions or {}
-        ours_id = self.head_commit_id()
-        theirs_id = self.resolve(other_branch)
-        if ours_id is None:
-            raise CadVcsError("La rama actual no tiene commits")
-        if self.is_dirty():
-            raise CadVcsError("Workdir sucio: commitea o descarta antes de merge")
-        if theirs_id == ours_id or theirs_id in self._ancestors(ours_id):
-            return {"result": "already-up-to-date"}
-
-        base_id = self.merge_base(ours_id, theirs_id)
-
-        # Fast-forward: ours es ancestro de theirs
-        if base_id == ours_id:
-            with self.conn:
-                self.conn.execute(
-                    "UPDATE branches SET head_commit_id = ? WHERE name = ?",
-                    (theirs_id, self.current_branch))
-            self.switch(self.current_branch, force=True)  # rematerializar
-            return {"result": "fast-forward", "commit_id": theirs_id}
-
         base_t = self._tree(base_id)
         ours_t = self._tree(ours_id)
         theirs_t = self._tree(theirs_id)
@@ -539,6 +519,7 @@ class Repo:
         merge_details: dict[str, str] = {}
 
         for rp in sorted(set(base_t) | set(ours_t) | set(theirs_t)):
+
             b = base_t.get(rp, {}).get("blob_sha")
             o = ours_t.get(rp, {}).get("blob_sha")
             t = theirs_t.get(rp, {}).get("blob_sha")
@@ -572,6 +553,14 @@ class Repo:
                     res = merge_mod.merge_dxf(pb, po, pt, self.root / rp,
                                               resolutions.get(rp))
                 if res.ok:
+                    applied = (res.applied_modified + res.applied_added +
+                               res.applied_deleted + res.resolved)
+                    if applied == 0:
+                        # Convergencia total: nada que traer de theirs.
+                        # Restaurar los bytes exactos de ours para no
+                        # generar un commit no-op por el re-save del DXF.
+                        self.store.get(o, self.root / rp)
+                        continue
                     merge_details[rp] = res.summary()
                 else:
                     conflicts[rp] = res.conflicts
@@ -596,6 +585,40 @@ class Repo:
                     merge_details[rp] = "theirs (resolución manual)"
                 else:
                     conflicts[rp] = "binary"      # requiere resolución manual
+        return conflicts, merge_details
+
+    def merge(self, other_branch: str, author: str,
+              message: str | None = None,
+              resolutions: dict[str, dict[str, str]] | None = None) -> dict:
+        """Merge de other_branch en la rama actual.
+
+        `resolutions` permite resolver conflictos de un intento previo:
+        {repo_path: {handle: 'ours'|'theirs'}} para entidades DXF, y la
+        clave especial '__file__' para binarios divergentes completos.
+        """
+        resolutions = resolutions or {}
+        ours_id = self.head_commit_id()
+        theirs_id = self.resolve(other_branch)
+        if ours_id is None:
+            raise CadVcsError("La rama actual no tiene commits")
+        if self.is_dirty():
+            raise CadVcsError("Workdir sucio: commitea o descarta antes de merge")
+        if theirs_id == ours_id or theirs_id in self._ancestors(ours_id):
+            return {"result": "already-up-to-date"}
+
+        base_id = self.merge_base(ours_id, theirs_id)
+
+        # Fast-forward: ours es ancestro de theirs
+        if base_id == ours_id:
+            with self.conn:
+                self.conn.execute(
+                    "UPDATE branches SET head_commit_id = ? WHERE name = ?",
+                    (theirs_id, self.current_branch))
+            self.switch(self.current_branch, force=True)  # rematerializar
+            return {"result": "fast-forward", "commit_id": theirs_id}
+
+        conflicts, merge_details = self._merge_trees(
+            base_id, ours_id, theirs_id, resolutions)
 
         if conflicts:
             # Restaurar workdir al estado de ours
@@ -609,6 +632,52 @@ class Repo:
             parent2_id=theirs_id)
         info["result"] = "merged"
         info["details"] = merge_details
+        return info
+
+    def cherry_pick(self, ref: str, author: str,
+                    message: str | None = None,
+                    resolutions: dict[str, dict[str, str]] | None = None) -> dict:
+        """Aplica los cambios de UN commit sobre la rama actual.
+
+        Tres vías con base = primer padre del commit elegido y theirs =
+        el commit; el resultado es un commit normal (un solo padre) en
+        la rama actual. Conflictos y resoluciones funcionan igual que en
+        merge. Para merge commits se usa el primer padre como mainline.
+        """
+        resolutions = resolutions or {}
+        ours_id = self.head_commit_id()
+        if ours_id is None:
+            raise CadVcsError("La rama actual no tiene commits")
+        if self.is_dirty():
+            raise CadVcsError(
+                "Workdir sucio: commitea o descarta antes de cherry-pick")
+        theirs_id = self.resolve(ref)
+        row = self.conn.execute(
+            "SELECT parent_id, message FROM commits WHERE id = ?",
+            (theirs_id,)).fetchone()
+        base_id = row["parent_id"]
+        if base_id is None:
+            raise CadVcsError(
+                "No se puede aplicar cherry-pick de un commit raíz")
+
+        conflicts, details = self._merge_trees(
+            base_id, ours_id, theirs_id, resolutions)
+
+        if conflicts:
+            self.switch(self.current_branch, force=True)
+            raise MergeConflictError(
+                f"Cherry-pick con conflictos en {len(conflicts)} archivo(s)",
+                conflicts)
+        if not details:
+            return {"result": "empty", "commit_id": None,
+                    "details": {}}
+
+        info = self.commit(
+            author=author,
+            message=message or
+            f"{row['message']} (cherry picked from c{theirs_id})")
+        info["result"] = "cherry-picked"
+        info["details"] = details
         return info
 
     # ================================================== blame

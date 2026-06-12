@@ -322,6 +322,34 @@ def merge_resolve(name: str, body: S.MergeResolveRequest,
                      resolutions=body.resolutions)
 
 
+@app.post("/repos/{name}/cherry-pick",
+          response_model=S.MergeResponse,
+          responses={409: {"model": S.MergeConflictResponse,
+                           "description": "Conflictos de cherry-pick"}})
+def cherry_pick(name: str, body: S.CherryPickRequest,
+                who: Principal = Depends(get_principal)):
+    with _repo_locks[name]:
+        try:
+            info = _open_repo(name).cherry_pick(
+                body.ref, who.username, body.message,
+                resolutions=body.resolutions)
+        except MergeConflictError as exc:
+            conflicts = {
+                rp: (c if c == "binary" else
+                     [S.EntityConflict(handle=x.handle, dxftype=x.dxftype,
+                                       reason=x.reason, ours=x.ours,
+                                       theirs=x.theirs).model_dump()
+                      for x in c])
+                for rp, c in exc.details.items()}
+            return JSONResponse(status_code=409,
+                                content={"detail": str(exc),
+                                         "conflicts": conflicts})
+        return S.MergeResponse(result=info["result"],
+                               commit_id=info.get("commit_id"),
+                               details=info.get("details"),
+                               author=who.username)
+
+
 # ----------------------------------------------------------- blame
 @app.get("/repos/{name}/blame/{file_path:path}",
          response_model=list[S.BlameEntry])
