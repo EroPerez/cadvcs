@@ -21,7 +21,8 @@ from collections import defaultdict
 from pathlib import Path
 
 from fastapi import Body, FastAPI, HTTPException, Query, Request
-from fastapi.responses import FileResponse, JSONResponse, Response
+from fastapi.responses import (JSONResponse, Response,
+                               StreamingResponse)
 
 from fastapi import Depends
 
@@ -103,10 +104,20 @@ def health():
     except Exception as exc:
         checks["storage"] = f"error: {exc}"
         status = 503
+    blob_url = os.environ.get("CADVCS_BLOB_URL")
+    if blob_url:
+        try:
+            from ..storage import S3BlobStore
+            S3BlobStore(blob_url).exists("0" * 64)  # ejercita credenciales
+            checks["blob_storage"] = "ok"
+        except Exception as exc:
+            checks["blob_storage"] = f"error: {exc}"
+            status = 503
     return JSONResponse(status_code=status,
                         content={"status": "ok" if status == 200 else "degraded",
                                  "backend": "postgresql" if os.environ.get(
                                      "CADVCS_DB_URL") else "sqlite",
+                                 "blob_backend": "s3" if blob_url else "local",
                                  "checks": checks})
 
 
@@ -157,10 +168,13 @@ def download_file(name: str, file_path: str, ref: str = Query("HEAD")):
     tree = repo._tree(repo.resolve(ref))
     if file_path not in tree:
         raise HTTPException(404, f"{file_path} no existe en {ref}")
-    blob_path = repo.store._path_for(tree[file_path]["blob_sha"])
-    return FileResponse(blob_path, filename=Path(file_path).name,
-                        media_type="application/octet-stream",
-                        headers={"X-Blob-Sha256": tree[file_path]["blob_sha"]})
+    sha = tree[file_path]["blob_sha"]
+    body = repo.store.open(sha)   # file-like: local o streaming desde S3
+    fname = Path(file_path).name
+    return StreamingResponse(
+        body, media_type="application/octet-stream",
+        headers={"X-Blob-Sha256": sha,
+                 "Content-Disposition": f'attachment; filename="{fname}"'})
 
 
 # ----------------------------------------------------------- estado / commits

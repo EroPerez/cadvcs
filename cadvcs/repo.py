@@ -25,7 +25,7 @@ from pathlib import Path
 import ezdxf
 
 from . import db, identity, semdiff, merge as merge_mod
-from .storage import BlobStore
+from .storage import BlobStore, open_store
 
 REPO_DIR = ".cadvcs"
 DEFAULT_BRANCH = "main"
@@ -56,7 +56,7 @@ class Repo:
         self.vcs_dir = self.root / REPO_DIR
         if not self.vcs_dir.exists():
             raise CadVcsError(f"No hay repo en {self.root} (ejecuta init)")
-        self.store = BlobStore(self.vcs_dir / "objects")
+        self.store = open_store(self.vcs_dir / "objects")
         self.conn = db.connect(self.vcs_dir / "metadata.db",
                                repo_key=self.root.name)
 
@@ -333,14 +333,19 @@ class Repo:
         # SWEEP de blobs e índice semántico
         dead_blobs = 0
         freed = 0
-        for shard in self.store.root.iterdir():
-            if not shard.is_dir():
-                continue
-            for obj in shard.iterdir():
-                sha = shard.name + obj.name
+        from .storage import S3BlobStore
+        if isinstance(self.store, S3BlobStore):
+            # Bucket compartido entre repos: un blob no referenciado por
+            # ESTE repo puede estarlo por otro. El sweep seguro de blobs
+            # en S3 requiere el conjunto vivo global (job multi-repo,
+            # ver ROADMAP); aquí solo barremos metadata.
+            blob_sweep = False
+        else:
+            blob_sweep = True
+            for sha, size in self.store.iter_digests():
                 if sha not in live_blobs:
-                    freed += obj.stat().st_size
-                    obj.unlink()
+                    freed += size
+                    self.store.delete(sha)
                     dead_blobs += 1
         if dead_blobs:
             with self.conn:
@@ -349,7 +354,8 @@ class Repo:
                     f"DELETE FROM entities WHERE blob_sha NOT IN "
                     f"({placeholders})", list(live_blobs))
         return {"commits_removed": len(dead_commits),
-                "blobs_removed": dead_blobs, "bytes_freed": freed}
+                "blobs_removed": dead_blobs, "bytes_freed": freed,
+                "blob_sweep": blob_sweep}
 
     def branch_create(self, name: str):
         if self.conn.execute("SELECT 1 FROM branches WHERE name = ?",

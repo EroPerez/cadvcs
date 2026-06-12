@@ -8,7 +8,7 @@ Backlog razonado de evolución, ordenado por área. La arquitectura objetivo com
 
 **Compresión delta en el blob store.** Los DXF cambian poco entre saves; xdelta3 entre versiones consecutivas del mismo `repo_path` reduciría el storage drásticamente, manteniendo el SHA del contenido completo como identidad y reconstruyendo bajo demanda (el modelo packfile de Git).
 
-**Garbage collection.** Mark-and-sweep sobre `commit_entries`: blobs no referenciados por ningún commit (tras borrado de ramas o `reset`) son recolectables. Requiere primero implementar borrado de ramas y commits.
+**Garbage collection.** Implementado (PR gc): mark-and-sweep sobre `commit_entries`. Pendiente el **gc multi-repo en bucket S3 compartido**: como el bucket es global para deduplicación entre repos, el sweep de blobs en backend S3 está desactivado por seguridad (`blob_sweep=False`) — un blob no referenciado por un repo puede estarlo por otro. La versión correcta es un job que une el conjunto vivo de TODOS los schemas/repos antes de borrar, ejecutado fuera del request.
 
 **Soporte de paperspace, layouts y bloques.** El diff/merge actual opera solo sobre modelspace; los layouts de impresión y las definiciones de bloque son cambios de diseño reales que hoy pasan como "binario cambió".
 

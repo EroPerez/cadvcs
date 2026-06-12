@@ -176,3 +176,7 @@ curl localhost:8000/health
 ```
 
 `GET /health` (sin token: es la sonda de Kubernetes/LB) verifica conectividad de metadata y escritura en storage, y reporta el backend activo. La imagen corre como usuario no privilegiado con `HEALTHCHECK` integrado.
+
+## Blob store en S3/OCI
+
+Los blobs pueden vivir en object storage S3-compatible definiendo `CADVCS_BLOB_URL=s3://bucket/prefijo` (credenciales por la cadena estándar de AWS; `CADVCS_S3_ENDPOINT` para MinIO, OCI Object Storage en modo S3-compat o LocalStack). La interfaz es idéntica al backend local —misma clave SHA-256 con sharding `objects/ab/cdef...`— así que `repo.py` no cambia, y el bucket global da deduplicación también **entre repositorios**. La descarga por la API es streaming desde el store y `gc` opera sobre la abstracción (`iter_digests`/`delete`), así que funciona igual en ambos backends. Suite específica en `test_s3.py` (moto), también en CI con metadata en PostgreSQL.
