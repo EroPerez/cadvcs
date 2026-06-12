@@ -79,6 +79,36 @@ def _cadvcs_error(request: Request, exc: CadVcsError):
     return JSONResponse(status_code=status, content={"detail": str(exc)})
 
 
+@app.get("/health")
+def health():
+    """Liveness/readiness: verifica metadata DB y storage escribible."""
+    import uuid as _uuid
+    checks = {"database": "ok", "storage": "ok"}
+    status = 200
+    try:
+        from .. import db as _db
+        probe = DATA_DIR / ".healthcheck"
+        conn = _db.connect(probe / "metadata.db", repo_key="healthcheck") \
+            if _db.DB_URL else None
+        if conn:
+            conn.execute("SELECT 1").fetchone()
+    except Exception as exc:
+        checks["database"] = f"error: {exc}"
+        status = 503
+    try:
+        token = DATA_DIR / f".health-{_uuid.uuid4().hex}"
+        token.write_text("ok")
+        token.unlink()
+    except Exception as exc:
+        checks["storage"] = f"error: {exc}"
+        status = 503
+    return JSONResponse(status_code=status,
+                        content={"status": "ok" if status == 200 else "degraded",
+                                 "backend": "postgresql" if os.environ.get(
+                                     "CADVCS_DB_URL") else "sqlite",
+                                 "checks": checks})
+
+
 # ----------------------------------------------------------- repos
 @app.post("/repos", response_model=S.RepoInfo, status_code=201)
 def create_repo(body: S.RepoCreate):

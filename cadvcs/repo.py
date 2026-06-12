@@ -55,7 +55,8 @@ class Repo:
         if not self.vcs_dir.exists():
             raise CadVcsError(f"No hay repo en {self.root} (ejecuta init)")
         self.store = BlobStore(self.vcs_dir / "objects")
-        self.conn = db.connect(self.vcs_dir / "metadata.db")
+        self.conn = db.connect(self.vcs_dir / "metadata.db",
+                               repo_key=self.root.name)
 
     @classmethod
     def init(cls, root: Path) -> "Repo":
@@ -212,10 +213,9 @@ class Repo:
                 self._index_blob(sha, fs_path)
 
         with self.conn:
-            cur = self.conn.execute(
+            cid = self.conn.insert_id(
                 "INSERT INTO commits (parent_id, parent2_id, author, message) "
                 "VALUES (?, ?, ?, ?)", (parent_id, parent2_id, author, message))
-            cid = cur.lastrowid
             self.conn.executemany(
                 "INSERT INTO commit_entries (commit_id, repo_path, blob_sha, "
                 "size_bytes) VALUES (?, ?, ?, ?)",

@@ -1,0 +1,37 @@
+# Stack de producción mínimo: API + PostgreSQL.
+# Los blobs viven en el volumen cadvcs-data (S3/OCI en la evolución
+# descrita en ARCHITECTURE.md); la metadata en PostgreSQL.
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: cadvcs
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?definir en .env}
+      POSTGRES_DB: cadvcs
+    volumes:
+      - cadvcs-pg:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U cadvcs"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  api:
+    build: .
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      CADVCS_DB_URL: postgresql://cadvcs:${POSTGRES_PASSWORD}@db:5432/cadvcs
+      CADVCS_DATA: /data
+      CADVCS_OIDC_ISSUER: ${CADVCS_OIDC_ISSUER:-}
+      CADVCS_OIDC_AUDIENCE: ${CADVCS_OIDC_AUDIENCE:-cadvcs}
+      CADVCS_DEFAULT_ROLES: ${CADVCS_DEFAULT_ROLES:-editor}
+    volumes:
+      - cadvcs-data:/data
+    ports:
+      - "8000:8000"
+
+volumes:
+  cadvcs-pg:
+  cadvcs-data:

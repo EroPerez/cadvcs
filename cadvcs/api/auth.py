@@ -25,7 +25,7 @@ import urllib.request
 from pathlib import Path
 
 import jwt
-from fastapi import Depends, HTTPException
+from fastapi import Depends, HTTPException, Request
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel
 
@@ -77,9 +77,15 @@ def _signing_key(token: str):
 
 
 def get_principal(
+    request: Request,
     creds: HTTPAuthorizationCredentials | None = Depends(_bearer),
 ) -> Principal:
-    """Dependencia FastAPI: valida el Bearer JWT y devuelve el principal."""
+    """Dependencia FastAPI: valida el Bearer JWT y devuelve el principal.
+
+    /health queda fuera de la auth: es la sonda de liveness/readiness
+    de Kubernetes y los load balancers, que no llevan token."""
+    if request.url.path == "/health":
+        return Principal(sub="healthcheck", username="healthcheck")
     if not AUTH_ENABLED:
         return Principal(sub="dev", username="dev")
 
