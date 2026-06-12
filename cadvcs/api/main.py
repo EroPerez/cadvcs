@@ -21,7 +21,7 @@ from collections import defaultdict
 from pathlib import Path
 
 from fastapi import Body, FastAPI, HTTPException, Query, Request
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, Response
 
 from fastapi import Depends
 
@@ -241,6 +241,52 @@ def _do_merge(name: str, branch: str, author: str, message: str | None,
                                commit_id=info.get("commit_id"),
                                details=info.get("details"),
                                author=author)
+
+
+@app.get("/repos/{name}/diff/visual")
+def diff_visual(name: str, ref_a: str = Query(...), ref_b: str = Query(...),
+                path: str = Query(...)):
+    """SVG con overlay de cambios entre dos versiones de un DXF.
+
+    Inmutable por par de refs+path → Cache-Control immutable; un proxy
+    o CDN puede cachearlo para siempre."""
+    import tempfile as _tf
+    from .. import visualdiff
+    repo = _open_repo(name)
+    ta = repo._tree(repo.resolve(ref_a))
+    tb = repo._tree(repo.resolve(ref_b))
+    if path not in ta or path not in tb:
+        raise HTTPException(404, f"{path} no existe en ambas refs")
+    if not path.lower().endswith(".dxf"):
+        raise HTTPException(422, "diff visual solo soporta DXF")
+    with _tf.TemporaryDirectory() as td:
+        pa, pb = Path(td) / "a.dxf", Path(td) / "b.dxf"
+        repo.store.get(ta[path]["blob_sha"], pa)
+        repo.store.get(tb[path]["blob_sha"], pb)
+        svg_text = visualdiff.render_diff_svg(pa, pb)
+    return Response(svg_text, media_type="image/svg+xml",
+                    headers={"Cache-Control":
+                             "public, max-age=31536000, immutable"})
+
+
+@app.get("/repos/{name}/render/{file_path:path}")
+def render_version(name: str, file_path: str, ref: str = Query("HEAD")):
+    """SVG de una versión concreta (visor / thumbnail)."""
+    import tempfile as _tf
+    from .. import visualdiff
+    repo = _open_repo(name)
+    tree = repo._tree(repo.resolve(ref))
+    if file_path not in tree:
+        raise HTTPException(404, f"{file_path} no existe en {ref}")
+    if not file_path.lower().endswith(".dxf"):
+        raise HTTPException(422, "render solo soporta DXF")
+    with _tf.TemporaryDirectory() as td:
+        p = Path(td) / "v.dxf"
+        repo.store.get(tree[file_path]["blob_sha"], p)
+        svg_text = visualdiff.render_version_svg(p)
+    return Response(svg_text, media_type="image/svg+xml",
+                    headers={"Cache-Control":
+                             "public, max-age=31536000, immutable"})
 
 
 @app.post("/repos/{name}/merge",
