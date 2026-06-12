@@ -66,6 +66,10 @@ def main(argv=None):
     s = sub.add_parser("merge")
     s.add_argument("branch"); s.add_argument("--user", required=True)
     s.add_argument("-m", "--message", default=None)
+    s.add_argument("--resolve", action="append", default=[],
+                   metavar="PATH:HANDLE=CHOICE",
+                   help="resolución manual, ej: plano.dxf:31=theirs "
+                        "(repetible; '__file__' para binarios)")
 
     s = sub.add_parser("blame")
     s.add_argument("file"); s.add_argument("--ref", default="HEAD")
@@ -151,8 +155,20 @@ def main(argv=None):
                     _print_semdiff(rp, sd)
 
         elif args.cmd == "merge":
+            resolutions: dict = {}
+            for spec in args.resolve:
+                try:
+                    path_part, choice = spec.rsplit("=", 1)
+                    rp, handle = path_part.rsplit(":", 1)
+                    assert choice in ("ours", "theirs")
+                except (ValueError, AssertionError):
+                    print(f"error: --resolve inválido: {spec} "
+                          f"(formato PATH:HANDLE=ours|theirs)", file=sys.stderr)
+                    return 2
+                resolutions.setdefault(rp, {})[handle] = choice
             try:
-                info = repo.merge(args.branch, args.user, args.message)
+                info = repo.merge(args.branch, args.user, args.message,
+                                  resolutions=resolutions or None)
                 if info["result"] == "already-up-to-date":
                     print("Ya actualizado")
                 elif info["result"] == "fast-forward":

@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "cadvcs"
-version = "0.3.0"
+version = "0.4.0"
 description = "Git-like version control for CAD files (DXF/DWG) with entity-level merge"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -13,8 +13,8 @@ authors = [{ name = "Erodis Pérez Michel" }]
 dependencies = ["ezdxf>=1.4"]
 
 [project.optional-dependencies]
-api = ["fastapi>=0.110", "uvicorn>=0.29"]
-dev = ["fastapi>=0.110", "uvicorn>=0.29", "httpx"]
+api = ["fastapi>=0.110", "uvicorn>=0.29", "pyjwt[crypto]>=2.6"]
+dev = ["fastapi>=0.110", "uvicorn>=0.29", "httpx", "pyjwt[crypto]>=2.6"]
 
 [project.scripts]
 cadvcs = "cadvcs.cli:main"

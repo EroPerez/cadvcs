@@ -16,7 +16,6 @@ class RepoInfo(BaseModel):
 
 
 class CommitRequest(BaseModel):
-    author: str = Field(min_length=1, max_length=64)
     message: str = ""
 
 
@@ -74,14 +73,22 @@ class TagInfo(BaseModel):
 
 class MergeRequest(BaseModel):
     branch: str
-    author: str = Field(min_length=1, max_length=64)
     message: str | None = None
+
+
+class MergeResolveRequest(BaseModel):
+    branch: str
+    message: str | None = None
+    resolutions: dict[str, dict[str, str]] = Field(
+        description="repo_path → {handle: 'ours'|'theirs'}; "
+                    "clave '__file__' para binarios divergentes completos")
 
 
 class MergeResponse(BaseModel):
     result: str                      # merged | fast-forward | already-up-to-date
     commit_id: int | None = None
     details: dict[str, str] | None = None
+    author: str | None = None
 
 
 class EntityConflict(BaseModel):
@@ -99,7 +106,6 @@ class MergeConflictResponse(BaseModel):
 
 class LockRequest(BaseModel):
     path: str
-    owner: str = Field(min_length=1, max_length=64)
 
 
 class LockInfo(BaseModel):

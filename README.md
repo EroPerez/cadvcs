@@ -127,3 +127,32 @@ Semántica HTTP: 409 para conflictos de merge con payload estructurado (handle, 
 ```
 
 Seguridad MVP: validación de slug de repo, guard anti path-traversal en rutas de archivo (incluida la forma URL-encoded), y la dir `.cadvcs` inaccesible vía API. Test end-to-end en `test_api.py` (24 checks: flujo completo de ramas y merge vía HTTP, 409 estructurado, 423 de locks, descarga histórica).
+
+## Resolución interactiva de conflictos
+
+El ciclo del 409 se cierra de forma **stateless**: `POST /repos/{n}/merge/resolve` recalcula el merge a tres vías desde las refs aplicando elecciones por handle, así que no hay sesión de merge en servidor ni estado intermedio que limpiar.
+
+```json
+POST /repos/nave/merge/resolve
+{
+  "branch": "propuesta",
+  "resolutions": {
+    "plano.dxf": { "31": "theirs", "2F": "ours" },
+    "render.png": { "__file__": "theirs" }
+  }
+}
+```
+
+Semántica por tipo de conflicto al elegir `theirs`: en modify/modify se aplican los atributos de theirs; en modify/delete se re-importa la entidad borrada (o se borra la modificada, según la dirección); en add/add se sustituye el contenido (mismo dxftype → atributos; distinto → reemplazo de entidad). La clave `__file__` resuelve binarios divergentes completos. La **resolución parcial devuelve 409 solo con los conflictos restantes**, lo que permite a una UI resolver de forma incremental. En CLI: `cadvcs merge rama --user ero --resolve plano.dxf:31=theirs` (repetible).
+
+## Auth OIDC
+
+Toda la API requiere JWT Bearer RS256 validado contra el JWKS del identity provider (descubierto vía `/.well-known/openid-configuration`, con override por `CADVCS_OIDC_JWKS_URL` o fichero local para tests/air-gapped). El `author` de commits y merges y el `owner` de locks salen de `preferred_username` del token — el cliente ya no puede suplantar identidad por body.
+
+```bash
+export CADVCS_OIDC_ISSUER=https://idp.example.com/realms/cad
+export CADVCS_OIDC_AUDIENCE=cadvcs
+uvicorn cadvcs.api.main:app
+```
+
+Sin issuer configurado la API arranca en modo dev sin auth (principal `dev`) con warning explícito. El test suite genera su propio par RSA y JWKS, firma tokens reales para dos usuarios y cubre los 401 (sin token, firma ajena, expirado, audience incorrecta) además del flujo completo de resolución.

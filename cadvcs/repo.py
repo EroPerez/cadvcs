@@ -390,7 +390,15 @@ class Repo:
 
     # ================================================== merge
     def merge(self, other_branch: str, author: str,
-              message: str | None = None) -> dict:
+              message: str | None = None,
+              resolutions: dict[str, dict[str, str]] | None = None) -> dict:
+        """Merge de other_branch en la rama actual.
+
+        `resolutions` permite resolver conflictos de un intento previo:
+        {repo_path: {handle: 'ours'|'theirs'}} para entidades DXF, y la
+        clave especial '__file__' para binarios divergentes completos.
+        """
+        resolutions = resolutions or {}
         ours_id = self.head_commit_id()
         theirs_id = self.resolve(other_branch)
         if ours_id is None:
@@ -448,13 +456,33 @@ class Repo:
                     self.store.get(b, pb)
                     self.store.get(o, po)
                     self.store.get(t, pt)
-                    res = merge_mod.merge_dxf(pb, po, pt, self.root / rp)
+                    res = merge_mod.merge_dxf(pb, po, pt, self.root / rp,
+                                              resolutions.get(rp))
                 if res.ok:
                     merge_details[rp] = res.summary()
                 else:
                     conflicts[rp] = res.conflicts
             else:
-                conflicts[rp] = "binary"      # no-DXF divergente: manual
+                # Binario divergente (o DXF con borrado de archivo completo):
+                # solo resoluble a nivel de archivo
+                file_choice = resolutions.get(rp, {}).get("__file__")
+                if file_choice == "ours":
+                    merge_details[rp] = "ours (resolución manual)"
+                elif file_choice == "theirs":
+                    if t is None:
+                        (self.root / rp).unlink(missing_ok=True)
+                        with self.conn:
+                            self.conn.execute(
+                                "DELETE FROM tracked WHERE repo_path = ?", (rp,))
+                    else:
+                        self.store.get(t, self.root / rp)
+                        with self.conn:
+                            self.conn.execute(
+                                "INSERT OR IGNORE INTO tracked (repo_path) "
+                                "VALUES (?)", (rp,))
+                    merge_details[rp] = "theirs (resolución manual)"
+                else:
+                    conflicts[rp] = "binary"      # requiere resolución manual
 
         if conflicts:
             # Restaurar workdir al estado de ours

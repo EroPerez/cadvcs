@@ -23,10 +23,13 @@ from pathlib import Path
 from fastapi import Body, FastAPI, HTTPException, Query, Request
 from fastapi.responses import FileResponse, JSONResponse
 
+from fastapi import Depends
+
 from .. import semdiff
 from ..repo import Repo, CadVcsError, LockError, MergeConflictError, REPO_DIR
 from ..storage import BlobStore
 from . import schemas as S
+from .auth import Principal, get_principal
 
 DATA_DIR = Path(os.environ.get("CADVCS_DATA", "./cadvcs-data")).resolve()
 DATA_DIR.mkdir(parents=True, exist_ok=True)
@@ -35,9 +38,10 @@ _repo_locks: dict[str, threading.Lock] = defaultdict(threading.Lock)
 
 app = FastAPI(
     title="cadvcs API",
-    version="0.3.0",
+    version="0.4.0",
     description="Control de versiones tipo Git para archivos CAD "
-                "con merge a nivel de entidad DXF",
+                "con merge a nivel de entidad DXF y auth OIDC",
+    dependencies=[Depends(get_principal)],   # toda la API requiere JWT válido
 )
 
 
@@ -134,9 +138,10 @@ def status(name: str):
 
 
 @app.post("/repos/{name}/commits", response_model=S.CommitInfo, status_code=201)
-def commit(name: str, body: S.CommitRequest):
+def commit(name: str, body: S.CommitRequest,
+           who: Principal = Depends(get_principal)):
     with _repo_locks[name]:
-        info = _open_repo(name).commit(body.author, body.message)
+        info = _open_repo(name).commit(who.username, body.message)
         return S.CommitInfo(**info)
 
 
@@ -191,14 +196,12 @@ def diff(name: str, ref_a: str = Query(...), ref_b: str = Query(...)):
                          for rp, sd in d["modified"].items()}}
 
 
-@app.post("/repos/{name}/merge",
-          response_model=S.MergeResponse,
-          responses={409: {"model": S.MergeConflictResponse,
-                           "description": "Conflictos de merge"}})
-def merge(name: str, body: S.MergeRequest):
+def _do_merge(name: str, branch: str, author: str, message: str | None,
+              resolutions: dict | None = None):
     with _repo_locks[name]:
         try:
-            info = _open_repo(name).merge(body.branch, body.author, body.message)
+            info = _open_repo(name).merge(branch, author, message,
+                                          resolutions=resolutions)
         except MergeConflictError as exc:
             conflicts = {
                 rp: (c if c == "binary" else
@@ -212,7 +215,32 @@ def merge(name: str, body: S.MergeRequest):
                                          "conflicts": conflicts})
         return S.MergeResponse(result=info["result"],
                                commit_id=info.get("commit_id"),
-                               details=info.get("details"))
+                               details=info.get("details"),
+                               author=author)
+
+
+@app.post("/repos/{name}/merge",
+          response_model=S.MergeResponse,
+          responses={409: {"model": S.MergeConflictResponse,
+                           "description": "Conflictos de merge"}})
+def merge(name: str, body: S.MergeRequest,
+          who: Principal = Depends(get_principal)):
+    return _do_merge(name, body.branch, who.username, body.message)
+
+
+@app.post("/repos/{name}/merge/resolve",
+          response_model=S.MergeResponse,
+          responses={409: {"model": S.MergeConflictResponse,
+                           "description": "Quedan conflictos sin resolver"}})
+def merge_resolve(name: str, body: S.MergeResolveRequest,
+                  who: Principal = Depends(get_principal)):
+    """Reintenta el merge aplicando elecciones ours/theirs por handle.
+
+    Stateless: recalcula el merge a tres vías desde las refs; las
+    elecciones resuelven los conflictos cubiertos y cualquier handle
+    conflictivo no cubierto vuelve como 409 con el detalle restante."""
+    return _do_merge(name, body.branch, who.username, body.message,
+                     resolutions=body.resolutions)
 
 
 # ----------------------------------------------------------- blame
@@ -234,19 +262,20 @@ def list_locks(name: str):
 
 
 @app.post("/repos/{name}/locks", response_model=S.LockInfo, status_code=201)
-def acquire_lock(name: str, body: S.LockRequest):
+def acquire_lock(name: str, body: S.LockRequest,
+                 who: Principal = Depends(get_principal)):
     with _repo_locks[name]:
         repo = _open_repo(name)
-        repo.lock(body.path, body.owner)
+        repo.lock(body.path, who.username)
         row = repo.conn.execute(
             "SELECT expires_at FROM locks WHERE repo_path = ?",
             (body.path,)).fetchone()
-        return S.LockInfo(path=body.path, owner=body.owner,
+        return S.LockInfo(path=body.path, owner=who.username,
                           expires_at=row["expires_at"])
 
 
 @app.delete("/repos/{name}/locks/{file_path:path}", status_code=204)
-def release_lock(name: str, file_path: str, owner: str = Query(...),
-                 force: bool = Query(False)):
+def release_lock(name: str, file_path: str, force: bool = Query(False),
+                 who: Principal = Depends(get_principal)):
     with _repo_locks[name]:
-        _open_repo(name).unlock(file_path, owner, force=force)
+        _open_repo(name).unlock(file_path, who.username, force=force)

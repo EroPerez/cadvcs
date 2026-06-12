@@ -64,6 +64,7 @@ class MergeResult:
     applied_modified: int = 0
     applied_added: int = 0
     applied_deleted: int = 0
+    resolved: int = 0
     conflicts: list[Conflict] = field(default_factory=list)
 
     @property
@@ -73,8 +74,11 @@ class MergeResult:
     def summary(self) -> str:
         if self.conflicts:
             return f"CONFLICTO ({len(self.conflicts)} entidades)"
-        return (f"auto-merge: ~{self.applied_modified} "
+        base = (f"auto-merge: ~{self.applied_modified} "
                 f"+{self.applied_added} -{self.applied_deleted}")
+        if self.resolved:
+            base += f" ({self.resolved} resueltas manualmente)"
+        return base
 
 
 def _json_to_dxf_value(value):
@@ -98,7 +102,12 @@ def _apply_attrs(entity, attrs: dict):
 
 
 def merge_dxf(base_path: Path, ours_path: Path, theirs_path: Path,
-              out_path: Path) -> MergeResult:
+              out_path: Path,
+              resolutions: dict[str, str] | None = None) -> MergeResult:
+    """Merge a tres vías. `resolutions` mapea handle → 'ours' | 'theirs'
+    para resolver manualmente conflictos detectados en un intento previo;
+    los handles sin resolución que colisionen siguen reportándose."""
+    resolutions = resolutions or {}
     base = extract_entities(base_path)
     ours = extract_entities(ours_path)
     theirs = extract_entities(theirs_path)
@@ -108,6 +117,16 @@ def merge_dxf(base_path: Path, ours_path: Path, theirs_path: Path,
     result = MergeResult()
 
     to_modify, to_add, to_delete = [], [], []
+
+    def resolve(h: str, reason: str, ours_e, theirs_e) -> str | None:
+        """Devuelve la elección si existe; si no, registra el conflicto."""
+        choice = resolutions.get(h)
+        if choice in ("ours", "theirs"):
+            result.resolved += 1
+            return choice
+        result.conflicts.append(Conflict(
+            h, (theirs_e or ours_e)["dxftype"], reason, ours_e, theirs_e))
+        return None
 
     for h in sorted(set(ours_state) | set(theirs_state)):
         so = ours_state.get(h, UNCHANGED if h in base else None)
@@ -122,8 +141,14 @@ def merge_dxf(base_path: Path, ours_path: Path, theirs_path: Path,
             if so == ADDED:
                 if ours[h]["fingerprint"] == e_theirs["fingerprint"]:
                     continue  # añadieron lo mismo
-                result.conflicts.append(Conflict(
-                    h, e_theirs["dxftype"], "add/add", ours[h], e_theirs))
+                choice = resolve(h, "add/add", ours[h], e_theirs)
+                if choice == "theirs":
+                    if ours[h]["dxftype"] == e_theirs["dxftype"]:
+                        to_modify.append(h)
+                    else:           # tipo distinto: sustituir la entidad
+                        to_delete.append(h)
+                        to_add.append(h)
+                # choice == 'ours' o None: no traer nada de theirs
             else:
                 to_add.append(h)
 
@@ -133,18 +158,21 @@ def merge_dxf(base_path: Path, ours_path: Path, theirs_path: Path,
             elif so == MODIFIED:
                 if ours[h]["fingerprint"] == e_theirs["fingerprint"]:
                     continue  # convergieron al mismo estado
-                result.conflicts.append(Conflict(
-                    h, e_theirs["dxftype"], "modify/modify", ours[h], e_theirs))
+                choice = resolve(h, "modify/modify", ours[h], e_theirs)
+                if choice == "theirs":
+                    to_modify.append(h)
             elif so == DELETED:
-                result.conflicts.append(Conflict(
-                    h, e_theirs["dxftype"], "modify/delete", None, e_theirs))
+                choice = resolve(h, "modify/delete", None, e_theirs)
+                if choice == "theirs":
+                    to_add.append(h)   # re-importar la entidad borrada en ours
 
         elif st == DELETED:
             if so == UNCHANGED:
                 to_delete.append(h)
             elif so == MODIFIED:
-                result.conflicts.append(Conflict(
-                    h, ours[h]["dxftype"], "modify/delete", ours[h], None))
+                choice = resolve(h, "modify/delete", ours[h], None)
+                if choice == "theirs":
+                    to_delete.append(h)
             # so == DELETED: ambos lo borraron, nada que hacer
 
     if result.conflicts:
