@@ -22,7 +22,9 @@ import tempfile
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from . import db, semdiff, merge as merge_mod
+import ezdxf
+
+from . import db, identity, semdiff, merge as merge_mod
 from .storage import BlobStore
 
 REPO_DIR = ".cadvcs"
@@ -201,11 +203,19 @@ class Repo:
         self._check_locks(changed, author)
 
         parent_id = self.head_commit_id()
+        changed_set = set(changed)
         entries = {}
         for rp in self._tracked():
             fs_path = self.root / rp
             if not fs_path.exists():
                 continue  # borrado: simplemente no entra en el snapshot
+            # Identidad estable: inyectar GUIDs a entidades nuevas de los
+            # DXF que cambiaron (los no cambiados ya los recibieron en su
+            # primer commit; tocarlos los marcaría como modificados)
+            if rp in changed_set and fs_path.suffix.lower() == ".dxf":
+                doc = ezdxf.readfile(fs_path)
+                if identity.ensure_guids(doc):
+                    doc.saveas(fs_path)
             sha, size = self.store.put(fs_path)
             entries[rp] = (sha, size)
             if fs_path.suffix.lower() == ".dxf":
@@ -500,48 +510,68 @@ class Repo:
 
     # ================================================== blame
     def blame(self, repo_path: str, ref: str = "HEAD") -> list[dict]:
-        """Para cada entidad de la versión actual: último commit que la tocó.
+        """Para cada entidad de la versión en ref: el commit que la dejó
+        en su estado actual.
 
-        Recorre la cadena first-parent desde ref hacia atrás; una entidad se
-        atribuye al commit donde su fingerprint difiere del padre (o aparece).
+        Desciende por el DAG completo (no solo first-parent): desde ref,
+        para cada uid se sigue al padre cuya versión tiene el MISMO
+        fingerprint; cuando ningún padre coincide (cambió respecto a
+        todos, o no existe en ninguno), ese commit es el responsable.
+        Gracias a los GUIDs, una entidad creada en una rama y fusionada
+        conserva su identidad y se atribuye a su commit de origen, no al
+        merge commit.
         """
         if not repo_path.lower().endswith(".dxf"):
             raise CadVcsError("blame solo soporta DXF")
-        chain = self.log(ref, limit=10_000)
-        current_sha = None
-        for c in chain:
-            tree = self._tree(c["id"])
-            if repo_path in tree:
-                current_sha = tree[repo_path]["blob_sha"]
-                break
-        if current_sha is None:
+        head_id = self.resolve(ref)
+
+        def file_entities(commit_id: int | None) -> dict[str, dict]:
+            if commit_id is None:
+                return {}
+            sha = self._tree(commit_id).get(repo_path, {}).get("blob_sha")
+            return self._entities_for_blob(sha) if sha else {}
+
+        def parents(commit_id: int) -> list[int]:
+            row = self.conn.execute(
+                "SELECT parent_id, parent2_id FROM commits WHERE id = ?",
+                (commit_id,)).fetchone()
+            return [p for p in (row["parent_id"], row["parent2_id"]) if p]
+
+        def commit_info(commit_id: int) -> dict:
+            row = self.conn.execute(
+                "SELECT id, author, message FROM commits WHERE id = ?",
+                (commit_id,)).fetchone()
+            return {"commit_id": row["id"], "author": row["author"],
+                    "message": row["message"]}
+
+        current = file_entities(head_id)
+        if not current:
             raise CadVcsError(f"{repo_path} no existe en {ref}")
 
-        current = self._entities_for_blob(current_sha)
+        ents_cache: dict[int, dict] = {head_id: current}
+
+        def ents(cid: int) -> dict:
+            if cid not in ents_cache:
+                ents_cache[cid] = file_entities(cid)
+            return ents_cache[cid]
+
         attribution: dict[str, dict] = {}
-        pending = set(current)
+        for uid, record in current.items():
+            cid, fp = head_id, record["fingerprint"]
+            seen = set()
+            while True:
+                seen.add(cid)
+                nxt = None
+                for p in parents(cid):
+                    pe = ents(p).get(uid)
+                    if pe and pe["fingerprint"] == fp and p not in seen:
+                        nxt = p
+                        break
+                if nxt is None:
+                    attribution[uid] = commit_info(cid)
+                    break
+                cid = nxt
 
-        for i, c in enumerate(chain):
-            if not pending:
-                break
-            tree = self._tree(c["id"])
-            parent_tree = self._tree(chain[i + 1]["id"]) if i + 1 < len(chain) else {}
-            sha = tree.get(repo_path, {}).get("blob_sha")
-            psha = parent_tree.get(repo_path, {}).get("blob_sha")
-            if sha is None:
-                continue
-            ents = self._entities_for_blob(sha)
-            pents = self._entities_for_blob(psha) if psha else {}
-            for h in list(pending):
-                if h not in ents:
-                    continue
-                changed_here = (h not in pents or
-                                pents[h]["fingerprint"] != ents[h]["fingerprint"])
-                if changed_here:
-                    attribution[h] = {"commit_id": c["id"], "author": c["author"],
-                                      "message": c["message"]}
-                    pending.discard(h)
-
-        return [{"handle": h, "dxftype": current[h]["dxftype"],
-                 "layer": current[h]["layer"], **attribution.get(h, {})}
-                for h in sorted(current)]
+        return [{"handle": uid, "dxftype": current[uid]["dxftype"],
+                 "layer": current[uid]["layer"], **attribution[uid]}
+                for uid in sorted(current)]
