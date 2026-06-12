@@ -19,13 +19,12 @@ from __future__ import annotations
 
 import json
 import tempfile
+import ezdxf
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-import ezdxf
-
 from . import db, identity, semdiff, merge as merge_mod
-from .storage import BlobStore
+from .storage import BlobStore, open_store
 
 REPO_DIR = ".cadvcs"
 DEFAULT_BRANCH = "main"
@@ -56,9 +55,8 @@ class Repo:
         self.vcs_dir = self.root / REPO_DIR
         if not self.vcs_dir.exists():
             raise CadVcsError(f"No hay repo en {self.root} (ejecuta init)")
-        self.store = BlobStore(self.vcs_dir / "objects")
-        self.conn = db.connect(self.vcs_dir / "metadata.db",
-                               repo_key=self.root.name)
+        self.store = open_store(self.vcs_dir / "objects")
+        self.conn = db.connect(self.vcs_dir / "metadata.db")
 
     @classmethod
     def init(cls, root: Path) -> "Repo":
