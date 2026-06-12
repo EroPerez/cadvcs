@@ -71,6 +71,10 @@ def main(argv=None):
                    help="resolución manual, ej: plano.dxf:31=theirs "
                         "(repetible; '__file__' para binarios)")
 
+    s = sub.add_parser("cherry-pick")
+    s.add_argument("ref"); s.add_argument("--user", required=True)
+    s.add_argument("-m", "--message", default=None)
+
     s = sub.add_parser("blame")
     s.add_argument("file"); s.add_argument("--ref", default="HEAD")
 
@@ -187,6 +191,17 @@ def main(argv=None):
                         for c in conf:
                             print(f"  {rp}: {c.reason} {c.dxftype} "
                                   f"handle={c.handle}", file=sys.stderr)
+                return 1
+
+        elif args.cmd == "cherry-pick":
+            try:
+                info = repo.cherry_pick(args.ref, args.user, args.message)
+                if info["result"] == "empty":
+                    print("Nada que aplicar (cambios ya presentes)")
+                else:
+                    print(f"Cherry-pick OK → c{info['commit_id']}")
+            except MergeConflictError as exc:
+                print(f"error: {exc}", file=sys.stderr)
                 return 1
 
         elif args.cmd == "blame":
