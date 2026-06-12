@@ -18,6 +18,7 @@
 from __future__ import annotations
 
 import argparse
+import json as _json
 import sys
 from pathlib import Path
 
@@ -52,6 +53,9 @@ def main(argv=None):
 
     s = sub.add_parser("log")
     s.add_argument("ref", nargs="?", default="HEAD")
+    s.add_argument("--author"); s.add_argument("--path")
+    s.add_argument("--since"); s.add_argument("--limit", type=int, default=50)
+    s.add_argument("--json", action="store_true")
 
     s = sub.add_parser("branch"); s.add_argument("name", nargs="?")
     s.add_argument("-d", "--delete", action="store_true")
@@ -117,7 +121,12 @@ def main(argv=None):
                   f"{len(info['changed'])} archivo(s): {', '.join(info['changed'])}")
 
         elif args.cmd == "log":
-            for c in repo.log(args.ref):
+            entries = repo.log(args.ref, args.limit, author=args.author,
+                               path=args.path, since=args.since)
+            if args.json:
+                print(_json.dumps(entries, indent=2, ensure_ascii=False))
+                return 0
+            for c in entries:
                 refs = c["branches"] + c["tags"]
                 decorations = f" ({', '.join(refs)})" if refs else ""
                 merge = " [merge]" if c["is_merge"] else ""
