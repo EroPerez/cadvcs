@@ -179,3 +179,7 @@ curl localhost:8000/health
 ```
 
 `GET /health` (sin token: es la sonda de Kubernetes/LB) verifica conectividad de metadata y escritura en storage, y reporta el backend activo. La imagen corre como usuario no privilegiado con `HEALTHCHECK` integrado.
+
+## Web UI
+
+Interfaz visual servida por la propia API en `/ui/` (redirect desde `/`). Cubre todo el sistema —historial, comparación con diff visual, fusión, autoría y bloqueos— y su pieza central es el **resolutor de conflictos**: ante un 409 de fusión, muestra cada entidad en discordia con sus dos lados y permite elegir ours/theirs por entidad, enviando las elecciones a `merge/resolve`. SPA en vanilla JS sin build; el shell es público y las llamadas de datos llevan el token. El lenguaje visual es la mesa de dibujo: papel blanco, azul de cianotipo y rojo de revisión semántico, con monoespaciada para todo dato (SHAs, handles, coordenadas). Verificado con un test de contrato UI↔API que comprueba que cada ruta invocada por el front existe en la API.
