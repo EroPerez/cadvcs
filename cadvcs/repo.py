@@ -166,20 +166,45 @@ class Repo:
                 self.conn.execute(
                     "INSERT OR IGNORE INTO tracked (repo_path) VALUES (?)", (rp,))
 
+    def stage_blob(self, repo_path: str, blob_sha: str, size: int):
+        """Registra un blob ya en el store (subido por presigned) como el
+        contenido de repo_path, sin tocar la working copy local."""
+        self.store.register(blob_sha, size)   # falla si el cliente no subió
+        with self.conn:
+            self.conn.execute(
+                "INSERT OR IGNORE INTO tracked (repo_path) VALUES (?)",
+                (repo_path,))
+            self.conn.execute("DELETE FROM staged WHERE repo_path = ?",
+                              (repo_path,))
+            self.conn.execute(
+                "INSERT INTO staged (repo_path, blob_sha, size_bytes) "
+                "VALUES (?, ?, ?)", (repo_path, blob_sha, size))
+
     def _tracked(self) -> list[str]:
         return [r["repo_path"] for r in
                 self.conn.execute("SELECT repo_path FROM tracked").fetchall()]
 
+    def _staged(self) -> dict[str, dict]:
+        rows = self.conn.execute(
+            "SELECT repo_path, blob_sha, size_bytes FROM staged").fetchall()
+        return {r["repo_path"]: dict(r) for r in rows}
+
     def status(self) -> dict[str, list[str]]:
         head = self._tree(self.head_commit_id())
+        staged = self._staged()
         st = {"new": [], "modified": [], "deleted": [], "clean": []}
-        for rp in sorted(self._tracked()):
-            fs_path = self.root / rp
-            if not fs_path.exists():
-                if rp in head:
-                    st["deleted"].append(rp)
-                continue
-            sha = BlobStore.hash_file(fs_path)
+        for rp in sorted(set(self._tracked()) | set(staged)):
+            # Una entrada staged (presigned) define el contenido por SHA
+            # sin necesidad de fichero local en la working copy.
+            if rp in staged:
+                sha = staged[rp]["blob_sha"]
+            else:
+                fs_path = self.root / rp
+                if not fs_path.exists():
+                    if rp in head:
+                        st["deleted"].append(rp)
+                    continue
+                sha = BlobStore.hash_file(fs_path)
             if rp not in head:
                 st["new"].append(rp)
             elif head[rp]["blob_sha"] != sha:
@@ -203,9 +228,19 @@ class Repo:
 
         parent_id = self.head_commit_id()
         changed_set = set(changed)
+        staged = self._staged()
         entries = {}
         to_index: list[str] = []
         for rp in self._tracked():
+            if rp in staged:
+                # Blob subido por presigned: ya está en el store. No se lee
+                # disco ni se inyectan GUIDs (la identidad cae a handle vía
+                # entity_uid; el cliente puede inyectar GUIDs antes de subir).
+                sha, size = staged[rp]["blob_sha"], staged[rp]["size_bytes"]
+                entries[rp] = (sha, size)
+                if rp.lower().endswith(".dxf"):
+                    to_index.append(sha)
+                continue
             fs_path = self.root / rp
             if not fs_path.exists():
                 continue  # borrado: simplemente no entra en el snapshot
@@ -242,6 +277,8 @@ class Repo:
                     self.conn.execute(
                         "INSERT INTO index_outbox (blob_sha, repo_key) "
                         "VALUES (?, ?)", (sha, self.root.name))
+            # Limpiar staging de lo commiteado
+            self.conn.execute("DELETE FROM staged")
             # Los archivos borrados dejan de estar tracked
             for rp in st["deleted"]:
                 self.conn.execute("DELETE FROM tracked WHERE repo_path = ?", (rp,))

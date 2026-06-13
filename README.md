@@ -183,3 +183,13 @@ curl localhost:8000/health
 ## Indexado asíncrono
 
 El parseo de entidades DXF sale del path de commit mediante **transactional outbox**: el commit escribe un evento `pending` en `index_outbox` en su misma transacción, y `python -m cadvcs.worker` lo drena en segundo plano (multi-repo sobre `CADVCS_DATA`, `--once` para CI o polling con backoff para despliegue). La correctitud no depende del worker: si un diff/merge/blame toca un blob aún no indexado, `_entities_for_blob` lo indexa bajo demanda y cierra el evento, así que el worker solo reduce latencia. `docker-compose.yml` incluye el servicio worker. Suite en `test_async.py`, en CI sobre ambos backends.
+
+## Subida y descarga directas a object storage (presigned)
+
+Con backend S3, el servidor puede salir del path de bytes para archivos grandes (modelo Git-LFS). Flujo de subida dedup-aware:
+
+1. El cliente calcula el SHA-256 en local y pide `POST /repos/{n}/blobs/{sha}/upload-url`. Si el blob ya existe → `{exists:true}` sin URL (cero transferencia). Si no → `{exists:false, upload_url}` (PUT presigned).
+2. El cliente hace `PUT` directo a object storage con esa URL — los bytes nunca pasan por la API.
+3. `PUT /repos/{n}/staged/{path}` con `{sha256,size}` registra el blob por referencia; el `commit` siguiente lo incluye sin leer bytes.
+
+Descarga: `GET /files/{path}?presigned=true` devuelve un `307` a una URL GET presigned (la descarga sale directa de S3). La subida/descarga por la API (`PUT/GET /files`) siguen disponibles para el backend local y archivos pequeños. Suite en `test_presigned.py` (moto server por HTTP real), en CI sobre ambos backends.

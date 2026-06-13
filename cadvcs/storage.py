@@ -139,6 +139,38 @@ class S3BlobStore:
                 raise KeyError(f"Blob {digest} no existe en el store")
             raise
 
+    def presigned_put(self, digest: str, expires: int = 900) -> str:
+        """URL para que el CLIENTE suba el blob directo a S3 (PUT).
+
+        El servidor nunca toca los bytes. La clave es el SHA, así que la
+        integridad se preserva: el cliente sube bajo su propio hash y un
+        verificador posterior (o la política del bucket) puede rechazar
+        mismatches. Expira en `expires` segundos."""
+        return self.s3.generate_presigned_url(
+            "put_object",
+            Params={"Bucket": self.bucket, "Key": self._key(digest)},
+            ExpiresIn=expires)
+
+    def presigned_get(self, digest: str, expires: int = 900,
+                      filename: str | None = None) -> str:
+        """URL para que el CLIENTE descargue el blob directo de S3 (GET)."""
+        params = {"Bucket": self.bucket, "Key": self._key(digest)}
+        if filename:
+            params["ResponseContentDisposition"] = (
+                f'attachment; filename="{filename}"')
+        return self.s3.generate_presigned_url(
+            "get_object", Params=params, ExpiresIn=expires)
+
+    def register(self, digest: str, size: int) -> tuple[str, int]:
+        """Confirma un blob ya subido por presigned PUT.
+
+        Verifica que el objeto existe (el cliente completó la subida) y
+        devuelve (digest, size) como `put`. No re-sube nada."""
+        if not self.exists(digest):
+            raise KeyError(f"Blob {digest} no está en el store "
+                           f"(el cliente no completó el PUT presigned)")
+        return digest, size
+
 
 def open_store(local_root: Path):
     """Factory: S3 si CADVCS_BLOB_URL está definido, local en caso contrario.
