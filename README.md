@@ -179,3 +179,7 @@ curl localhost:8000/health
 ```
 
 `GET /health` (sin token: es la sonda de Kubernetes/LB) verifica conectividad de metadata y escritura en storage, y reporta el backend activo. La imagen corre como usuario no privilegiado con `HEALTHCHECK` integrado.
+
+## Tests
+
+Las suites de script (`demo.py`, `test_api.py`, `test_s3.py`, `test_async.py`, `test_presigned.py`) cubren integración end-to-end y corren en CI sobre ambos backends. Además, `tests/` contiene **property-based tests** del motor de merge con hypothesis: generan cientos de configuraciones aleatorias de cambios base/ours/theirs y verifican invariantes (sin pérdida espuria, cambios de un lado preservados, convergencia, detección de conflictos, totalidad de la resolución, determinismo). `pytest` es el runner unificado (`python -m pytest`); el adaptador `tests/test_script_suites.py` ejecuta las suites de script para una migración incremental.

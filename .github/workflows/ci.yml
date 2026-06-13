@@ -24,6 +24,18 @@ jobs:
         run: python test_api.py
       - name: S3 blob store end-to-end (moto)
         run: python test_s3.py
+  property-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install
+        run: pip install -e ".[dev]"
+      - name: Merge engine property tests (hypothesis)
+        run: python -m pytest tests/test_merge_properties.py -q
+
   test-postgres:
     runs-on: ubuntu-latest
     services:
