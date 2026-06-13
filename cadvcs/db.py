@@ -69,6 +69,14 @@ CREATE TABLE IF NOT EXISTS tracked (
     repo_path TEXT PRIMARY KEY
 );
 
+-- Blobs subidos por el cliente directamente a object storage (presigned)
+-- y registrados por referencia: el commit los toma de aquí sin leer disco.
+CREATE TABLE IF NOT EXISTS staged (
+    repo_path  TEXT PRIMARY KEY,
+    blob_sha   TEXT NOT NULL,
+    size_bytes INTEGER NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS locks (
     repo_path   TEXT PRIMARY KEY,
     owner       TEXT NOT NULL,
@@ -131,6 +139,11 @@ _PG_SCHEMA = [
     " commit_id INTEGER NOT NULL REFERENCES commits(id))",
 
     "CREATE TABLE IF NOT EXISTS tracked (repo_path TEXT PRIMARY KEY)",
+
+    "CREATE TABLE IF NOT EXISTS staged ("
+    " repo_path TEXT PRIMARY KEY,"
+    " blob_sha TEXT NOT NULL,"
+    " size_bytes BIGINT NOT NULL)",
 
     "CREATE TABLE IF NOT EXISTS locks ("
     " repo_path TEXT PRIMARY KEY,"
