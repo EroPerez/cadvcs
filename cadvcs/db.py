@@ -85,6 +85,21 @@ CREATE TABLE IF NOT EXISTS entities (
     attrs_json  TEXT NOT NULL,
     PRIMARY KEY (blob_sha, handle)
 );
+
+-- Transactional outbox: eventos de indexado escritos en la MISMA
+-- transacción del commit, drenados por un worker. status: pending →
+-- done (o queda pending para reintento). Garantiza que metadata y
+-- evento son atómicos sin depender de un broker en el path de commit.
+CREATE TABLE IF NOT EXISTS index_outbox (
+    id         INTEGER PRIMARY KEY,
+    blob_sha   TEXT NOT NULL,
+    repo_key   TEXT NOT NULL,
+    status     TEXT NOT NULL DEFAULT 'pending',
+    attempts   INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%d %H:%M:%S', 'now'))
+);
+CREATE INDEX IF NOT EXISTS idx_outbox_pending
+    ON index_outbox(status) WHERE status = 'pending';
 """
 
 _PG_NOW = "to_char(now() AT TIME ZONE 'utc', 'YYYY-MM-DD HH24:MI:SS')"
@@ -131,6 +146,17 @@ _PG_SCHEMA = [
     " fingerprint TEXT NOT NULL,"
     " attrs_json TEXT NOT NULL,"
     " PRIMARY KEY (blob_sha, handle))",
+
+    "CREATE TABLE IF NOT EXISTS index_outbox ("
+    " id INTEGER GENERATED ALWAYS AS IDENTITY PRIMARY KEY,"
+    " blob_sha TEXT NOT NULL,"
+    " repo_key TEXT NOT NULL,"
+    " status TEXT NOT NULL DEFAULT 'pending',"
+    " attempts INTEGER NOT NULL DEFAULT 0,"
+    f" created_at TEXT NOT NULL DEFAULT {_PG_NOW})",
+
+    "CREATE INDEX IF NOT EXISTS idx_outbox_pending"
+    " ON index_outbox(status) WHERE status = 'pending'",
 ]
 
 _OR_IGNORE = re.compile(r"^\s*INSERT\s+OR\s+IGNORE\s+INTO", re.IGNORECASE)

@@ -15,6 +15,7 @@
 | 09 | [API REST](specs/09-rest-api.md) | `api/main.py` |
 | 10 | [Autenticación OIDC](specs/10-auth-oidc.md) | `api/auth.py` |
 | 11 | [Identidad de entidad por GUID](specs/11-entity-guids.md) | `identity.py` |
+| 12 | [Indexado asíncrono (outbox + worker)](specs/12-async-indexing.md) | `worker.py` |
 
 ## Otros documentos
 

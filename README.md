@@ -179,3 +179,7 @@ curl localhost:8000/health
 ```
 
 `GET /health` (sin token: es la sonda de Kubernetes/LB) verifica conectividad de metadata y escritura en storage, y reporta el backend activo. La imagen corre como usuario no privilegiado con `HEALTHCHECK` integrado.
+
+## Indexado asíncrono
+
+El parseo de entidades DXF sale del path de commit mediante **transactional outbox**: el commit escribe un evento `pending` en `index_outbox` en su misma transacción, y `python -m cadvcs.worker` lo drena en segundo plano (multi-repo sobre `CADVCS_DATA`, `--once` para CI o polling con backoff para despliegue). La correctitud no depende del worker: si un diff/merge/blame toca un blob aún no indexado, `_entities_for_blob` lo indexa bajo demanda y cierra el evento, así que el worker solo reduce latencia. `docker-compose.yml` incluye el servicio worker. Suite en `test_async.py`, en CI sobre ambos backends.

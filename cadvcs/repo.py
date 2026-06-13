@@ -204,6 +204,7 @@ class Repo:
         parent_id = self.head_commit_id()
         changed_set = set(changed)
         entries = {}
+        to_index: list[str] = []
         for rp in self._tracked():
             fs_path = self.root / rp
             if not fs_path.exists():
@@ -218,7 +219,7 @@ class Repo:
             sha, size = self.store.put(fs_path)
             entries[rp] = (sha, size)
             if fs_path.suffix.lower() == ".dxf":
-                self._index_blob(sha, fs_path)
+                to_index.append(sha)
 
         with self.conn:
             cid = self.conn.insert_id(
@@ -228,6 +229,19 @@ class Repo:
                 "INSERT INTO commit_entries (commit_id, repo_path, blob_sha, "
                 "size_bytes) VALUES (?, ?, ?, ?)",
                 [(cid, rp, sha, size) for rp, (sha, size) in entries.items()])
+            # Transactional outbox: el evento de indexado entra en la MISMA
+            # transacción que el commit. Si un blob ya está indexado (dedup),
+            # no se encola. El worker lo drena; mientras tanto, la primera
+            # lectura vía _entities_for_blob indexa bajo demanda como red de
+            # seguridad, así diff/merge/blame nunca esperan al worker.
+            for sha in dict.fromkeys(to_index):  # únicos, orden estable
+                already = self.conn.execute(
+                    "SELECT 1 FROM entities WHERE blob_sha = ? LIMIT 1",
+                    (sha,)).fetchone()
+                if not already:
+                    self.conn.execute(
+                        "INSERT INTO index_outbox (blob_sha, repo_key) "
+                        "VALUES (?, ?)", (sha, self.root.name))
             # Los archivos borrados dejan de estar tracked
             for rp in st["deleted"]:
                 self.conn.execute("DELETE FROM tracked WHERE repo_path = ?", (rp,))
@@ -251,6 +265,55 @@ class Repo:
                 [(blob_sha, h, e["dxftype"], e["layer"], e["fingerprint"],
                   json.dumps(e["attrs"], default=str)) for h, e in ents.items()])
 
+    def index_pending(self, limit: int = 100) -> list[dict]:
+        """Eventos de indexado pendientes (para el worker)."""
+        rows = self.conn.execute(
+            "SELECT id, blob_sha, attempts FROM index_outbox "
+            "WHERE status = 'pending' ORDER BY id LIMIT ?", (limit,)).fetchall()
+        return [dict(r) for r in rows]
+
+    def index_one(self, event_id: int, blob_sha: str) -> bool:
+        """Procesa un evento: materializa el blob, lo indexa y marca done.
+
+        Idempotente: si el blob ya está indexado, solo cierra el evento.
+        Devuelve True si tuvo éxito; ante error incrementa attempts y deja
+        el evento pendiente para reintento.
+        """
+        try:
+            already = self.conn.execute(
+                "SELECT 1 FROM entities WHERE blob_sha = ? LIMIT 1",
+                (blob_sha,)).fetchone()
+            if not already:
+                with tempfile.NamedTemporaryFile(suffix=".dxf",
+                                                 delete=False) as tmp:
+                    tmp_path = Path(tmp.name)
+                try:
+                    self.store.get(blob_sha, tmp_path)
+                    self._index_blob(blob_sha, tmp_path)
+                finally:
+                    tmp_path.unlink(missing_ok=True)
+            with self.conn:
+                self.conn.execute(
+                    "UPDATE index_outbox SET status = 'done' WHERE id = ?",
+                    (event_id,))
+            return True
+        except Exception:
+            with self.conn:
+                self.conn.execute(
+                    "UPDATE index_outbox SET attempts = attempts + 1 "
+                    "WHERE id = ?", (event_id,))
+            return False
+
+    def index_drain(self, limit: int = 100) -> dict:
+        """Drena el outbox de ESTE repo (útil en tests y modo síncrono)."""
+        done = failed = 0
+        for ev in self.index_pending(limit):
+            if self.index_one(ev["id"], ev["blob_sha"]):
+                done += 1
+            else:
+                failed += 1
+        return {"done": done, "failed": failed}
+
     def _entities_for_blob(self, blob_sha: str) -> dict[str, dict]:
         rows = self.conn.execute(
             "SELECT handle, dxftype, layer, fingerprint, attrs_json "
@@ -262,6 +325,11 @@ class Repo:
             self.store.get(blob_sha, tmp_path)
             self._index_blob(blob_sha, tmp_path)
             tmp_path.unlink()
+            # Indexado bajo demanda: cerrar su evento outbox si lo hubiera
+            with self.conn:
+                self.conn.execute(
+                    "UPDATE index_outbox SET status = 'done' "
+                    "WHERE blob_sha = ? AND status = 'pending'", (blob_sha,))
             return self._entities_for_blob(blob_sha)
         return {r["handle"]: {"dxftype": r["dxftype"], "layer": r["layer"],
                               "fingerprint": r["fingerprint"],
