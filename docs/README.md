@@ -17,6 +17,7 @@
 | 11 | [Identidad de entidad por GUID](specs/11-entity-guids.md) | `identity.py` |
 | 12 | [Indexado asíncrono (outbox + worker)](specs/12-async-indexing.md) | `worker.py` |
 | 13 | [Subida/descarga presigned a S3](specs/13-presigned-urls.md) | `storage.py` |
+| 14 | [Property-based testing del merge](specs/14-property-testing.md) | `tests/` |
 | 15 | [Web UI](specs/15-web-ui.md) | `web/index.html` |
 | 16 | [Conversión DWG→DXF](specs/16-dwg-conversion.md) | `convert.py` |
 | 17 | [Eventos sobre Kafka](specs/17-kafka-events.md) | `bus.py` |

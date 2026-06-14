@@ -8,7 +8,9 @@ Persistir la historia como un DAG de changesets multi-archivo con refs nombradas
 
 ## Comportamiento
 
-`commits` forma el DAG: cada fila tiene `parent_id` y un `parent2_id` opcional que convierte el commit en merge commit. `commit_entries` es el árbol plano de cada commit — la lista completa de `(repo_path, blob_sha)` que existía en ese momento; gracias al content-addressing, un snapshot completo cuesta solo las filas de la tabla, no copias de archivos. `branches` y `tags` son punteros nombrados a commits (refs), `meta` guarda el HEAD (rama actual), `tracked` es el staging-lite de archivos bajo control, y `entities` es el índice semántico DXF **indexado por blob_sha** — un blob compartido por N commits se indexa exactamente una vez.
+`commits` forma el DAG: cada fila tiene `parent_id` y un `parent2_id` opcional que convierte el commit en merge commit. `commit_entries` es el árbol plano de cada commit — la lista completa de `(repo_path, blob_sha)` que existía en ese momento; gracias al content-addressing, un snapshot completo cuesta solo las filas de la tabla, no copias de archivos. `branches` y `tags` son punteros nombrados a commits (refs), `meta` guarda el HEAD (rama actual), `tracked` es el staging-lite de archivos bajo control, `locks` registra los bloqueos de archivos binarios (spec 06), y `entities` es el índice semántico DXF **indexado por blob_sha** — un blob compartido por N commits se indexa exactamente una vez.
+
+Tres tablas más sostienen el procesamiento asíncrono y los formatos pesados: `index_outbox` es el transactional outbox del indexado (spec 12), con una columna `kind` que distingue `index` (extraer entidades de un DXF) de `convert` (DWG→DXF, spec 16); `dwg_mirrors` mapea cada DWG a su DXF espejo `(dwg_sha → dxf_sha)` para que diff/blame/render operen sobre el espejo (spec 16); y `staged` registra los blobs subidos directamente a object storage por presigned (spec 13), que el commit incluye por referencia sin leer disco.
 
 ## Decisiones de diseño
 
