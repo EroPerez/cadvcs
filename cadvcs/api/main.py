@@ -21,7 +21,9 @@ from collections import defaultdict
 from pathlib import Path
 
 from fastapi import Body, FastAPI, HTTPException, Query, Request
-from fastapi.responses import FileResponse, JSONResponse, StreamingResponse, Response
+from fastapi.responses import (FileResponse, JSONResponse, RedirectResponse,
+                               StreamingResponse, Response)
+from fastapi.staticfiles import StaticFiles
 
 from fastapi import Depends
 
@@ -151,19 +153,62 @@ def upload_file(name: str, file_path: str, body: bytes = Body(media_type="applic
 
 
 @app.get("/repos/{name}/files/{file_path:path}")
-def download_file(name: str, file_path: str, ref: str = Query("HEAD")):
+def download_file(name: str, file_path: str, ref: str = Query("HEAD"),
+                  presigned: bool = Query(False)):
     """Descarga el archivo tal como existe en una ref (commit, rama o tag)."""
     repo = _open_repo(name)
     tree = repo._tree(repo.resolve(ref))
     if file_path not in tree:
         raise HTTPException(404, f"{file_path} no existe en {ref}")
     sha = tree[file_path]["blob_sha"]
-    body = repo.store.open(sha)   # file-like: local o streaming desde S3
     fname = Path(file_path).name
+    if presigned:
+        from ..storage import S3BlobStore
+        if not isinstance(repo.store, S3BlobStore):
+            raise HTTPException(409, "presigned requiere backend S3")
+        # 307: la descarga sale del path de bytes de la API, directa de S3
+        return RedirectResponse(repo.store.presigned_get(sha, filename=fname),
+                                status_code=307)
+    body = repo.store.open(sha)   # file-like: local o streaming desde S3
     return StreamingResponse(
         body, media_type="application/octet-stream",
         headers={"X-Blob-Sha256": sha,
                  "Content-Disposition": f'attachment; filename="{fname}"'})
+
+
+@app.post("/repos/{name}/blobs/{sha}/upload-url",
+          dependencies=[Depends(require_editor)])
+def upload_url(name: str, sha: str, expires: int = Query(900, le=3600)):
+    """Handshake de subida estilo Git-LFS, dedup-aware.
+
+    Si el blob ya está en el store → {exists:true} sin URL (cero
+    transferencia). Si no → {exists:false, upload_url} para que el
+    cliente haga PUT directo a object storage. Requiere backend S3."""
+    from ..storage import S3BlobStore
+    repo = _open_repo(name)
+    if not isinstance(repo.store, S3BlobStore):
+        raise HTTPException(409, "upload-url requiere backend S3 "
+                                 "(CADVCS_BLOB_URL); usa PUT /files en local")
+    if repo.store.exists(sha):
+        return {"exists": True}
+    return {"exists": False, "upload_url": repo.store.presigned_put(sha, expires),
+            "method": "PUT"}
+
+
+@app.put("/repos/{name}/staged/{file_path:path}",
+         response_model=S.UploadResponse,
+         dependencies=[Depends(require_editor)])
+def stage_file(name: str, file_path: str, body: S.StageRequest):
+    """Registra por referencia un blob ya subido por presigned PUT.
+
+    No transfiere bytes: el commit posterior lo incluirá tomando el SHA
+    del staging. Falla 422 si el cliente no completó la subida a S3."""
+    with _repo_locks[name]:
+        repo = _open_repo(name)
+        _safe_file_path(repo, file_path)   # valida la ruta
+        repo.stage_blob(file_path, body.sha256, body.size)
+        return S.UploadResponse(path=file_path, sha256=body.sha256,
+                                size=body.size, tracked=True)
 
 
 # ----------------------------------------------------------- estado / commits
@@ -423,3 +468,17 @@ def release_lock(name: str, file_path: str, force: bool = Query(False),
         raise HTTPException(403, "force unlock requiere rol admin")
     with _repo_locks[name]:
         _open_repo(name).unlock(file_path, who.username, force=force)
+
+
+# ----------------------------------------------------------- web UI
+@app.get("/", include_in_schema=False)
+def root():
+    """Atajo: la app web vive en /ui/."""
+    return RedirectResponse("/ui/")
+
+
+# El shell estático del UI (HTML/JS/CSS) se sirve sin auth; las llamadas
+# que hace a la API sí pasan por la autenticación. Como mount ASGI, queda
+# fuera de la dependencia global require_viewer.
+_WEB_DIR = Path(__file__).resolve().parent.parent / "web"
+app.mount("/ui", StaticFiles(directory=str(_WEB_DIR), html=True), name="ui")
