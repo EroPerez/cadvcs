@@ -105,10 +105,18 @@ def health():
     except Exception as exc:
         checks["storage"] = f"error: {exc}"
         status = 503
+    from ..cache import render_cache
+    from .. import bus as _bus, convert as _convert
+    checks["render_cache"] = "redis" if render_cache().enabled else "off"
+    checks["event_bus"] = "kafka" if _bus.get_bus() else "polling"
+    checks["dwg_converter"] = _convert.get_converter().name
     return JSONResponse(status_code=status,
                         content={"status": "ok" if status == 200 else "degraded",
                                  "backend": "postgresql" if os.environ.get(
                                      "CADVCS_DB_URL") else "sqlite",
+                                 "render_cache": checks["render_cache"],
+                                 "event_bus": checks["event_bus"],
+                                 "dwg_converter": checks["dwg_converter"],
                                  "checks": checks})
 
 
@@ -337,6 +345,7 @@ def diff_visual(name: str, ref_a: str = Query(...), ref_b: str = Query(...),
     o CDN puede cachearlo para siempre."""
     import tempfile as _tf
     from .. import visualdiff
+    from ..cache import render_cache
     repo = _open_repo(name)
     ta = repo._tree(repo.resolve(ref_a))
     tb = repo._tree(repo.resolve(ref_b))
@@ -344,11 +353,18 @@ def diff_visual(name: str, ref_a: str = Query(...), ref_b: str = Query(...),
         raise HTTPException(404, f"{path} no existe en ambas refs")
     if not path.lower().endswith(".dxf"):
         raise HTTPException(422, "diff visual solo soporta DXF")
-    with _tf.TemporaryDirectory() as td:
-        pa, pb = Path(td) / "a.dxf", Path(td) / "b.dxf"
-        repo.store.get(ta[path]["blob_sha"], pa)
-        repo.store.get(tb[path]["blob_sha"], pb)
-        svg_text = visualdiff.render_diff_svg(pa, pb)
+    sha_a, sha_b = ta[path]["blob_sha"], tb[path]["blob_sha"]
+    # Inmutable por par de SHAs de contenido → cacheable para siempre.
+    cache = render_cache()
+    ckey = cache.diff_key(name, sha_a, sha_b)
+    svg_text = cache.get(ckey)
+    if svg_text is None:
+        with _tf.TemporaryDirectory() as td:
+            pa, pb = Path(td) / "a.dxf", Path(td) / "b.dxf"
+            repo.store.get(sha_a, pa)
+            repo.store.get(sha_b, pb)
+            svg_text = visualdiff.render_diff_svg(pa, pb)
+        cache.set(ckey, svg_text)
     return Response(svg_text, media_type="image/svg+xml",
                     headers={"Cache-Control":
                              "public, max-age=31536000, immutable"})
@@ -359,16 +375,23 @@ def render_version(name: str, file_path: str, ref: str = Query("HEAD")):
     """SVG de una versión concreta (visor / thumbnail)."""
     import tempfile as _tf
     from .. import visualdiff
+    from ..cache import render_cache
     repo = _open_repo(name)
     tree = repo._tree(repo.resolve(ref))
     if file_path not in tree:
         raise HTTPException(404, f"{file_path} no existe en {ref}")
     if not file_path.lower().endswith(".dxf"):
         raise HTTPException(422, "render solo soporta DXF")
-    with _tf.TemporaryDirectory() as td:
-        p = Path(td) / "v.dxf"
-        repo.store.get(tree[file_path]["blob_sha"], p)
-        svg_text = visualdiff.render_version_svg(p)
+    sha = tree[file_path]["blob_sha"]
+    cache = render_cache()
+    ckey = cache.version_key(name, sha)
+    svg_text = cache.get(ckey)
+    if svg_text is None:
+        with _tf.TemporaryDirectory() as td:
+            p = Path(td) / "v.dxf"
+            repo.store.get(sha, p)
+            svg_text = visualdiff.render_version_svg(p)
+        cache.set(ckey, svg_text)
     return Response(svg_text, media_type="image/svg+xml",
                     headers={"Cache-Control":
                              "public, max-age=31536000, immutable"})

@@ -32,17 +32,63 @@ services:
     ports:
       - "8000:8000"
 
-  worker:
+  # Relay: publica el outbox en Kafka. Consumer: procesa los eventos.
+  # Sin Kafka, usa en su lugar un único worker en modo poll (ver README).
+  relay:
     build: .
     depends_on:
-      db:
-        condition: service_healthy
+      db: { condition: service_healthy }
+      kafka: { condition: service_healthy }
     environment:
       CADVCS_DB_URL: postgresql://cadvcs:${POSTGRES_PASSWORD}@db:5432/cadvcs
       CADVCS_DATA: /data
+      CADVCS_KAFKA_BROKERS: kafka:9092
     volumes:
       - cadvcs-data:/data
-    command: ["python", "-m", "cadvcs.worker", "--interval", "2.0"]
+    command: ["python", "-m", "cadvcs.worker", "--mode", "relay", "--interval", "2.0"]
+
+  worker:
+    build: .
+    depends_on:
+      db: { condition: service_healthy }
+      kafka: { condition: service_healthy }
+      redis: { condition: service_healthy }
+    environment:
+      CADVCS_DB_URL: postgresql://cadvcs:${POSTGRES_PASSWORD}@db:5432/cadvcs
+      CADVCS_DATA: /data
+      CADVCS_KAFKA_BROKERS: kafka:9092
+      CADVCS_REDIS_URL: redis://redis:6379/0
+      CADVCS_DWG_CONVERTER: ${CADVCS_DWG_CONVERTER:-none}
+    volumes:
+      - cadvcs-data:/data
+    # Consumer de Kafka (escala con réplicas: reparten particiones)
+    command: ["python", "-m", "cadvcs.worker", "--mode", "consume"]
+
+  redis:
+    image: redis:7-alpine
+    command: ["redis-server", "--save", "", "--appendonly", "no"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  kafka:
+    image: bitnami/kafka:3.7
+    environment:
+      KAFKA_CFG_NODE_ID: "0"
+      KAFKA_CFG_PROCESS_ROLES: "controller,broker"
+      KAFKA_CFG_LISTENERS: "PLAINTEXT://:9092,CONTROLLER://:9093"
+      KAFKA_CFG_ADVERTISED_LISTENERS: "PLAINTEXT://kafka:9092"
+      KAFKA_CFG_CONTROLLER_QUORUM_VOTERS: "0@kafka:9093"
+      KAFKA_CFG_CONTROLLER_LISTENER_NAMES: "CONTROLLER"
+      KAFKA_CFG_LISTENER_SECURITY_PROTOCOL_MAP: "CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT"
+      ALLOW_PLAINTEXT_LISTENER: "yes"
+    healthcheck:
+      test: ["CMD-SHELL", "kafka-topics.sh --bootstrap-server localhost:9092 --list || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
 
 volumes:
   cadvcs-pg:
