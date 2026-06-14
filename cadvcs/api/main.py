@@ -23,6 +23,7 @@ from pathlib import Path
 from fastapi import Body, FastAPI, HTTPException, Query, Request
 from fastapi.responses import (FileResponse, JSONResponse, RedirectResponse,
                                StreamingResponse, Response)
+from fastapi.staticfiles import StaticFiles
 
 from fastapi import Depends
 
@@ -467,3 +468,17 @@ def release_lock(name: str, file_path: str, force: bool = Query(False),
         raise HTTPException(403, "force unlock requiere rol admin")
     with _repo_locks[name]:
         _open_repo(name).unlock(file_path, who.username, force=force)
+
+
+# ----------------------------------------------------------- web UI
+@app.get("/", include_in_schema=False)
+def root():
+    """Atajo: la app web vive en /ui/."""
+    return RedirectResponse("/ui/")
+
+
+# El shell estático del UI (HTML/JS/CSS) se sirve sin auth; las llamadas
+# que hace a la API sí pasan por la autenticación. Como mount ASGI, queda
+# fuera de la dependencia global require_viewer.
+_WEB_DIR = Path(__file__).resolve().parent.parent / "web"
+app.mount("/ui", StaticFiles(directory=str(_WEB_DIR), html=True), name="ui")

@@ -17,6 +17,7 @@
 | 11 | [Identidad de entidad por GUID](specs/11-entity-guids.md) | `identity.py` |
 | 12 | [Indexado asíncrono (outbox + worker)](specs/12-async-indexing.md) | `worker.py` |
 | 13 | [Subida/descarga presigned a S3](specs/13-presigned-urls.md) | `storage.py` |
+| 15 | [Web UI](specs/15-web-ui.md) | `web/index.html` |
 
 ## Otros documentos
 

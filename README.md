@@ -193,3 +193,6 @@ Con backend S3, el servidor puede salir del path de bytes para archivos grandes 
 3. `PUT /repos/{n}/staged/{path}` con `{sha256,size}` registra el blob por referencia; el `commit` siguiente lo incluye sin leer bytes.
 
 Descarga: `GET /files/{path}?presigned=true` devuelve un `307` a una URL GET presigned (la descarga sale directa de S3). La subida/descarga por la API (`PUT/GET /files`) siguen disponibles para el backend local y archivos pequeños. Suite en `test_presigned.py` (moto server por HTTP real), en CI sobre ambos backends.
+## Web UI
+
+Interfaz visual servida por la propia API en `/ui/` (redirect desde `/`). Cubre todo el sistema —historial, comparación con diff visual, fusión, autoría y bloqueos— y su pieza central es el **resolutor de conflictos**: ante un 409 de fusión, muestra cada entidad en discordia con sus dos lados y permite elegir ours/theirs por entidad, enviando las elecciones a `merge/resolve`. SPA en vanilla JS sin build; el shell es público y las llamadas de datos llevan el token. El lenguaje visual es la mesa de dibujo: papel blanco, azul de cianotipo y rojo de revisión semántico, con monoespaciada para todo dato (SHAs, handles, coordenadas). Verificado con un test de contrato UI↔API que comprueba que cada ruta invocada por el front existe en la API.
