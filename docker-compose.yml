@@ -32,6 +32,18 @@ services:
     ports:
       - "8000:8000"
 
+  worker:
+    build: .
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      CADVCS_DB_URL: postgresql://cadvcs:${POSTGRES_PASSWORD}@db:5432/cadvcs
+      CADVCS_DATA: /data
+    volumes:
+      - cadvcs-data:/data
+    command: ["python", "-m", "cadvcs.worker", "--interval", "2.0"]
+
 volumes:
   cadvcs-pg:
   cadvcs-data:

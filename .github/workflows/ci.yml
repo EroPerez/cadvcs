@@ -17,7 +17,7 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
       - name: Install
-        run: pip install -e ".[dev]"
+        run: pip install -e ".[dev]" "moto[s3,server]>=5" requests
       - name: Core demo (branches, merge, blame)
         run: python demo.py
       - name: API end-to-end
@@ -45,7 +45,7 @@ jobs:
         with:
           python-version: "3.12"
       - name: Install
-        run: pip install -e ".[dev]" "psycopg[binary]>=3.1"
+        run: pip install -e ".[dev]" "moto[s3,server]>=5" requests "psycopg[binary]>=3.1"
       - name: Core demo against PostgreSQL
         run: python demo.py
       - name: API end-to-end against PostgreSQL

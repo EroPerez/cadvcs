@@ -180,6 +180,19 @@ curl localhost:8000/health
 
 `GET /health` (sin token: es la sonda de Kubernetes/LB) verifica conectividad de metadata y escritura en storage, y reporta el backend activo. La imagen corre como usuario no privilegiado con `HEALTHCHECK` integrado.
 
+## Indexado asíncrono
+
+El parseo de entidades DXF sale del path de commit mediante **transactional outbox**: el commit escribe un evento `pending` en `index_outbox` en su misma transacción, y `python -m cadvcs.worker` lo drena en segundo plano (multi-repo sobre `CADVCS_DATA`, `--once` para CI o polling con backoff para despliegue). La correctitud no depende del worker: si un diff/merge/blame toca un blob aún no indexado, `_entities_for_blob` lo indexa bajo demanda y cierra el evento, así que el worker solo reduce latencia. `docker-compose.yml` incluye el servicio worker. Suite en `test_async.py`, en CI sobre ambos backends.
+
+## Subida y descarga directas a object storage (presigned)
+
+Con backend S3, el servidor puede salir del path de bytes para archivos grandes (modelo Git-LFS). Flujo de subida dedup-aware:
+
+1. El cliente calcula el SHA-256 en local y pide `POST /repos/{n}/blobs/{sha}/upload-url`. Si el blob ya existe → `{exists:true}` sin URL (cero transferencia). Si no → `{exists:false, upload_url}` (PUT presigned).
+2. El cliente hace `PUT` directo a object storage con esa URL — los bytes nunca pasan por la API.
+3. `PUT /repos/{n}/staged/{path}` con `{sha256,size}` registra el blob por referencia; el `commit` siguiente lo incluye sin leer bytes.
+
+Descarga: `GET /files/{path}?presigned=true` devuelve un `307` a una URL GET presigned (la descarga sale directa de S3). La subida/descarga por la API (`PUT/GET /files`) siguen disponibles para el backend local y archivos pequeños. Suite en `test_presigned.py` (moto server por HTTP real), en CI sobre ambos backends.
 ## Web UI
 
 Interfaz visual servida por la propia API en `/ui/` (redirect desde `/`). Cubre todo el sistema —historial, comparación con diff visual, fusión, autoría y bloqueos— y su pieza central es el **resolutor de conflictos**: ante un 409 de fusión, muestra cada entidad en discordia con sus dos lados y permite elegir ours/theirs por entidad, enviando las elecciones a `merge/resolve`. SPA en vanilla JS sin build; el shell es público y las llamadas de datos llevan el token. El lenguaje visual es la mesa de dibujo: papel blanco, azul de cianotipo y rojo de revisión semántico, con monoespaciada para todo dato (SHAs, handles, coordenadas). Verificado con un test de contrato UI↔API que comprueba que cada ruta invocada por el front existe en la API.
