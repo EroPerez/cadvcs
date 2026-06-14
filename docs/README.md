@@ -24,6 +24,8 @@
 
 ## Otros documentos
 
+- [GUIA-PASO-A-PASO.md](GUIA-PASO-A-PASO.md) — guía de instalación y uso desde cero, paso a paso
+
 - [IMPROVEMENTS.md](IMPROVEMENTS.md) — backlog razonado de mejoras
 - [../ARCHITECTURE.md](../ARCHITECTURE.md) — arquitectura objetivo de producción
 - [architecture.svg](architecture.svg) — diagrama de la arquitectura
