@@ -22,6 +22,7 @@
 | 16 | [Conversión DWG→DXF](specs/16-dwg-conversion.md) | `convert.py` |
 | 17 | [Eventos sobre Kafka](specs/17-kafka-events.md) | `bus.py` |
 | 18 | [Cache de renders en Redis](specs/18-redis-cache.md) | `cache.py` |
+| 19 | [Despliegue en la nube](specs/19-cloud-deployment.md) | `deploy/k8s/` |
 
 ## Otros documentos
 

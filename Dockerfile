@@ -4,7 +4,7 @@ FROM python:3.12-slim
 WORKDIR /app
 COPY pyproject.toml README.md ./
 COPY cadvcs ./cadvcs
-RUN pip install --no-cache-dir ".[api]" "psycopg[binary]>=3.1"
+RUN pip install --no-cache-dir ".[api,cache,events,s3]" "psycopg[binary]>=3.1"
 
 # Usuario no privilegiado y directorio de datos
 RUN useradd -r -m cadvcs && mkdir -p /data && chown cadvcs /data

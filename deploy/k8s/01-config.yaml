@@ -1,0 +1,26 @@
+# Configuración no sensible. Los secretos (contraseñas, credenciales de
+# object storage) van en el Secret de abajo, NUNCA aquí.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: cadvcs-config
+  namespace: cadvcs
+data:
+  CADVCS_DATA: "/data"
+  # Metadata en PostgreSQL gestionado (RDS / Cloud SQL). El host real
+  # va aquí; la contraseña, en el Secret y se compone en el Deployment.
+  PGHOST: "postgres.cadvcs.svc.cluster.local"
+  PGDATABASE: "cadvcs"
+  PGUSER: "cadvcs"
+  # Blobs en object storage S3-compatible (S3 / GCS-S3 / OCI / MinIO)
+  CADVCS_BLOB_URL: "s3://cadvcs-blobs/prod"
+  # Cache de renders e índice de eventos
+  CADVCS_REDIS_URL: "redis://redis.cadvcs.svc.cluster.local:6379/0"
+  CADVCS_KAFKA_BROKERS: "kafka.cadvcs.svc.cluster.local:9092"
+  # Conversión DWG: 'none' por defecto; 'aspose'/'oda' con la licencia montada
+  CADVCS_DWG_CONVERTER: "none"
+  # OIDC del identity provider gestionado
+  CADVCS_OIDC_ISSUER: "https://idp.example.com/realms/cad"
+  CADVCS_OIDC_AUDIENCE: "cadvcs"
+  # Producción: deny-by-default para tokens sin claim de roles
+  CADVCS_DEFAULT_ROLES: ""

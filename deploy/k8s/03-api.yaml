@@ -1,0 +1,71 @@
+# API: stateless, escala horizontal. El estado vive en PostgreSQL (metadata),
+# object storage (blobs) y Redis (cache), así que se pueden correr N réplicas
+# detrás del Service sin coordinación.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: cadvcs-api
+  namespace: cadvcs
+spec:
+  replicas: 3
+  selector:
+    matchLabels: { app: cadvcs-api }
+  template:
+    metadata:
+      labels: { app: cadvcs-api }
+    spec:
+      # serviceAccountName: cadvcs   # con IRSA/Workload Identity para S3 sin claves
+      containers:
+        - name: api
+          image: ghcr.io/eroperez/cadvcs:latest
+          ports:
+            - containerPort: 8000
+          envFrom:
+            - configMapRef: { name: cadvcs-config }
+            - secretRef: { name: cadvcs-secrets }
+          env:
+            # Componer la URL de PostgreSQL a partir de config + secret
+            - name: CADVCS_DB_URL
+              value: "postgresql://$(PGUSER):$(POSTGRES_PASSWORD)@$(PGHOST)/$(PGDATABASE)"
+          # /health no requiere token (bypass de auth): sirve de probe
+          readinessProbe:
+            httpGet: { path: /health, port: 8000 }
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet: { path: /health, port: 8000 }
+            initialDelaySeconds: 10
+            periodSeconds: 30
+          resources:
+            requests: { cpu: "250m", memory: "512Mi" }
+            limits: { cpu: "1", memory: "1Gi" }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: cadvcs-api
+  namespace: cadvcs
+spec:
+  selector: { app: cadvcs-api }
+  ports:
+    - port: 80
+      targetPort: 8000
+---
+# Autoescalado por CPU: la API es el componente que ve picos de tráfico.
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: cadvcs-api
+  namespace: cadvcs
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: cadvcs-api
+  minReplicas: 3
+  maxReplicas: 10
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target: { type: Utilization, averageUtilization: 70 }
