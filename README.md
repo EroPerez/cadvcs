@@ -225,3 +225,9 @@ cad logout                        # borra la sesión
 ```
 
 El token se guarda por servidor (`--server`, o `CADVCS_SERVER`) con permisos `0600`, así que puedes tener sesiones contra varios despliegues. Además, tras `login` los comandos que registran autoría (`commit`, `merge`, `lock`...) ya **no necesitan `--user`**: lo toman del token (o de `CADVCS_USER`). Solo lo pides si quieres commitear con otra identidad.
+
+## Despliegue en la nube
+
+Una sola imagen Docker sirve los tres roles según el comando: API (`uvicorn`), relay (`worker --mode relay`) y consumer (`worker --mode consume`). Como el estado está externalizado —PostgreSQL para metadata, object storage para blobs, Redis y Kafka opcionales—, API y workers son stateless y escalan horizontalmente.
+
+`deploy/k8s/` contiene manifiestos listos para un clúster gestionado (EKS/GKE/AKS): API con réplicas + Service + Ingress TLS + HPA, relay (1 réplica) y consumer (HPA, reparto por consumer group de Kafka), con `/health` como probe. Los servicios pesados se delegan a gestionados (RDS/Cloud SQL, S3/GCS, ElastiCache, MSK); sin Kafka, la topología se reduce a un único `worker --mode poll`. La migración de esquema es automática al arrancar. Detalle en la [spec 19](docs/specs/19-cloud-deployment.md) y en `deploy/k8s/README.md`. Para desarrollo, `docker-compose.yml` levanta el stack completo en local.

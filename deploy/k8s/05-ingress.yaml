@@ -1,0 +1,25 @@
+# Ingress con TLS. La terminación TLS la hace el ingress controller
+# (nginx, ALB, GKE). cert-manager emite el certificado de Let's Encrypt.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: cadvcs
+  namespace: cadvcs
+  annotations:
+    cert-manager.io/cluster-issuer: "letsencrypt-prod"
+    nginx.ingress.kubernetes.io/proxy-body-size: "512m"  # planos grandes por PUT directo
+spec:
+  ingressClassName: nginx
+  tls:
+    - hosts: ["cadvcs.example.com"]
+      secretName: cadvcs-tls
+  rules:
+    - host: cadvcs.example.com
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: cadvcs-api
+                port: { number: 80 }
