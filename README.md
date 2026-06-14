@@ -199,3 +199,13 @@ Descarga: `GET /files/{path}?presigned=true` devuelve un `307` a una URL GET pre
 ## Web UI
 
 Interfaz visual servida por la propia API en `/ui/` (redirect desde `/`). Cubre todo el sistema —historial, comparación con diff visual, fusión, autoría y bloqueos— y su pieza central es el **resolutor de conflictos**: ante un 409 de fusión, muestra cada entidad en discordia con sus dos lados y permite elegir ours/theirs por entidad, enviando las elecciones a `merge/resolve`. SPA en vanilla JS sin build; el shell es público y las llamadas de datos llevan el token. El lenguaje visual es la mesa de dibujo: papel blanco, azul de cianotipo y rojo de revisión semántico, con monoespaciada para todo dato (SHAs, handles, coordenadas). Verificado con un test de contrato UI↔API que comprueba que cada ruta invocada por el front existe en la API.
+
+## Infraestructura: conversión DWG, Kafka, Redis
+
+El sistema soporta tres servicios de producción, **todos opcionales con degradación a no-op**:
+
+- **Conversión DWG→DXF** (`CADVCS_DWG_CONVERTER`): un `.dwg` commiteado encola un evento `convert`; el worker genera su DXF espejo (registrado en `dwg_mirrors`), sobre el que operan diff, blame y render. Backend pluggable: `aspose` (Aspose.CAD, requiere licencia), `oda` (ODA File Converter vía `CADVCS_ODA_BIN`) o `none` (DWG como binario opaco). Spec 16.
+- **Eventos sobre Kafka** (`CADVCS_KAFKA_BROKERS`): el outbox (fuente de verdad transaccional) se publica en Kafka por un *relay* y lo consumen workers en un consumer group que escala horizontalmente. `python -m cadvcs.worker --mode relay|consume`. Sin Kafka, el worker de polling sigue funcionando. Spec 17.
+- **Cache de renders en Redis** (`CADVCS_REDIS_URL`): los SVG de render y diff visual son inmutables (dependen solo de los SHAs de contenido), así que se cachean por clave de SHAs sin invalidación. Sin Redis, se recomputa. Spec 18.
+
+`docker-compose.yml` levanta el stack completo (PostgreSQL, Redis, Kafka en KRaft, API, relay, consumer). `/health` reporta el estado de cada pieza. Suite en `test_infra.py` (Redis real, bus Kafka en memoria, stub converter), en CI sobre ambos backends.

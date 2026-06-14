@@ -111,7 +111,10 @@ def get_principal(
     /health queda fuera de la auth: es la sonda de liveness/readiness
     de Kubernetes y los load balancers, que no llevan token."""
     if request.url.path == "/health":
-        return Principal(sub="healthcheck", username="healthcheck")
+        # La sonda no lleva token: el principal debe pasar require_viewer,
+        # así que se le da rol admin (la sonda está fuera de la autorización).
+        return Principal(sub="healthcheck", username="healthcheck",
+                         roles=["admin"])
     if not AUTH_ENABLED:
         return Principal(sub="dev", username="dev", roles=["admin"])
 
