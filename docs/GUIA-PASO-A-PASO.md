@@ -415,6 +415,18 @@ docker compose down                           # apagar (conserva datos)
 
 ---
 
+## 9.5. Llevarlo a internet (despliegue en la nube)
+
+La sección 5 levanta todo en *tu* ordenador. Para que esté disponible en internet, para tu equipo o tus clientes, hay que desplegarlo en la nube (Amazon, Google, Azure...). Esto ya es terreno de personas con experiencia en infraestructura, pero la idea, en simple, es esta:
+
+**El programa se empaqueta en una "imagen"** (una foto congelada del programa listo para correr, hecha con el `Dockerfile`). Esa imagen se sube a un registro y se ejecuta en muchas copias a la vez para aguantar a muchos usuarios.
+
+**Las piezas pesadas se alquilan ya hechas.** En vez de montar tú la base de datos o el almacenamiento, usas los servicios gestionados del proveedor: una base de datos PostgreSQL gestionada (Amazon RDS, Google Cloud SQL), almacenamiento de archivos (Amazon S3), y opcionalmente memoria rápida (Redis) y cola de tareas (Kafka). Tú solo le dices al programa dónde están, con las mismas variables de entorno de la sección 7.
+
+**Kubernetes orquesta todo.** Es el "director de orquesta" que mantiene las copias del programa vivas, las reinicia si fallan y crea más cuando hay mucha gente. En la carpeta `deploy/k8s/` están los archivos listos para esto, con su propio README explicando cada paso (`kubectl apply -f ...`).
+
+Lo bueno del diseño de cadvcs es que la API y los trabajadores no guardan nada propio: todo el estado vive en esos servicios alquilados. Eso significa que puedes encender 3 o 10 copias de la API sin que se pisen, y el sistema se adapta solo a la cantidad de usuarios. Los detalles completos están en `docs/specs/19-cloud-deployment.md` y en `deploy/k8s/README.md`.
+
 ## 10. ¿Y ahora qué?
 
 Si has llegado hasta aquí, ya sabes lo esencial. Para profundizar:
