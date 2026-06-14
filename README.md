@@ -40,6 +40,8 @@ cadvcs lock plano.dxf --user ero     # pesimista, para binarios no mergeables
 cadvcs checkout plano.dxf --ref v1.0 --out plano_v1.dxf
 ```
 
+El comando tiene un alias corto `cad` (`cad commit ...`). Tras `cad login` —que guarda tu token de sesión— `--user` es opcional: la identidad sale del token (o de `CADVCS_USER`). Ver la sección "Sesión y alias del CLI" más abajo.
+
 ## El merge a nivel de entidad
 
 La pieza diferencial. Con base = merge-base(ours, theirs), cada handle DXF se clasifica en cada lado como unchanged/modified/added/deleted:
@@ -182,7 +184,7 @@ curl localhost:8000/health
 
 ## Tests
 
-Las suites de script (`demo.py`, `test_api.py`, `test_s3.py`, `test_async.py`, `test_presigned.py`) cubren integración end-to-end y corren en CI sobre ambos backends. Además, `tests/` contiene **property-based tests** del motor de merge con hypothesis: generan cientos de configuraciones aleatorias de cambios base/ours/theirs y verifican invariantes (sin pérdida espuria, cambios de un lado preservados, convergencia, detección de conflictos, totalidad de la resolución, determinismo). `pytest` es el runner unificado (`python -m pytest`); el adaptador `tests/test_script_suites.py` ejecuta las suites de script para una migración incremental.
+Las suites de script (`demo.py`, `test_api.py`, `test_s3.py`, `test_async.py`, `test_presigned.py`, `test_ui.py`, `test_infra.py`, `test_cli_auth.py`) cubren integración end-to-end y corren en CI sobre ambos backends (SQLite y PostgreSQL). Además, `tests/` contiene **property-based tests** del motor de merge con hypothesis: generan cientos de configuraciones aleatorias de cambios base/ours/theirs y verifican invariantes (sin pérdida espuria, cambios de un lado preservados, convergencia, detección de conflictos, totalidad de la resolución, determinismo). `pytest` es el runner unificado (`python -m pytest`); el adaptador `tests/test_script_suites.py` ejecuta las suites de script para una migración incremental.
 ## Indexado asíncrono
 
 El parseo de entidades DXF sale del path de commit mediante **transactional outbox**: el commit escribe un evento `pending` en `index_outbox` en su misma transacción, y `python -m cadvcs.worker` lo drena en segundo plano (multi-repo sobre `CADVCS_DATA`, `--once` para CI o polling con backoff para despliegue). La correctitud no depende del worker: si un diff/merge/blame toca un blob aún no indexado, `_entities_for_blob` lo indexa bajo demanda y cierra el evento, así que el worker solo reduce latencia. `docker-compose.yml` incluye el servicio worker. Suite en `test_async.py`, en CI sobre ambos backends.
@@ -199,3 +201,27 @@ Descarga: `GET /files/{path}?presigned=true` devuelve un `307` a una URL GET pre
 ## Web UI
 
 Interfaz visual servida por la propia API en `/ui/` (redirect desde `/`). Cubre todo el sistema —historial, comparación con diff visual, fusión, autoría y bloqueos— y su pieza central es el **resolutor de conflictos**: ante un 409 de fusión, muestra cada entidad en discordia con sus dos lados y permite elegir ours/theirs por entidad, enviando las elecciones a `merge/resolve`. SPA en vanilla JS sin build; el shell es público y las llamadas de datos llevan el token. El lenguaje visual es la mesa de dibujo: papel blanco, azul de cianotipo y rojo de revisión semántico, con monoespaciada para todo dato (SHAs, handles, coordenadas). Verificado con un test de contrato UI↔API que comprueba que cada ruta invocada por el front existe en la API.
+
+## Infraestructura: conversión DWG, Kafka, Redis
+
+El sistema soporta tres servicios de producción, **todos opcionales con degradación a no-op**:
+
+- **Conversión DWG→DXF** (`CADVCS_DWG_CONVERTER`): un `.dwg` commiteado encola un evento `convert`; el worker genera su DXF espejo (registrado en `dwg_mirrors`), sobre el que operan diff, blame y render. Backend pluggable: `aspose` (Aspose.CAD, requiere licencia), `oda` (ODA File Converter vía `CADVCS_ODA_BIN`) o `none` (DWG como binario opaco). Spec 16.
+- **Eventos sobre Kafka** (`CADVCS_KAFKA_BROKERS`): el outbox (fuente de verdad transaccional) se publica en Kafka por un *relay* y lo consumen workers en un consumer group que escala horizontalmente. `python -m cadvcs.worker --mode relay|consume`. Sin Kafka, el worker de polling sigue funcionando. Spec 17.
+- **Cache de renders en Redis** (`CADVCS_REDIS_URL`): los SVG de render y diff visual son inmutables (dependen solo de los SHAs de contenido), así que se cachean por clave de SHAs sin invalidación. Sin Redis, se recomputa. Spec 18.
+
+`docker-compose.yml` levanta el stack completo (PostgreSQL, Redis, Kafka en KRaft, API, relay, consumer). `/health` reporta el estado de cada pieza. Suite en `test_infra.py` (Redis real, bus Kafka en memoria, stub converter), en CI sobre ambos backends.
+
+## Sesión y alias del CLI
+
+El comando es `cadvcs` (instalado por `pip install -e .`), con alias corto `cad`. Para no pegar el token a mano en cada uso:
+
+```bash
+cad login --token <JWT>           # pegar una vez; se guarda en ~/.config/cadvcs
+cad login --user ana              # o password grant contra el IdP OIDC (pide contraseña)
+cad whoami                        # muestra usuario, roles y caducidad del token
+cad token                         # imprime el JWT (p.ej. curl -H "Authorization: Bearer $(cad token)")
+cad logout                        # borra la sesión
+```
+
+El token se guarda por servidor (`--server`, o `CADVCS_SERVER`) con permisos `0600`, así que puedes tener sesiones contra varios despliegues. Además, tras `login` los comandos que registran autoría (`commit`, `merge`, `lock`...) ya **no necesitan `--user`**: lo toman del token (o de `CADVCS_USER`). Solo lo pides si quieres commitear con otra identidad.

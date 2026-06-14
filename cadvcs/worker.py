@@ -88,9 +88,36 @@ def main(argv=None):
     p.add_argument("--interval", type=float, default=2.0,
                    help="sleep máximo entre pasadas en modo continuo")
     p.add_argument("--batch", type=int, default=100)
+    p.add_argument("--mode", choices=["poll", "relay", "consume"], default="poll",
+                   help="poll: drena el outbox directo (default, sin Kafka). "
+                        "relay: publica el outbox en Kafka. "
+                        "consume: procesa eventos de Kafka.")
     args = p.parse_args(argv)
     logging.basicConfig(level=logging.INFO,
                         format="%(asctime)s %(name)s %(message)s")
+
+    if args.mode in ("relay", "consume"):
+        from . import bus as busmod
+        b = busmod.get_bus()
+        if b is None:
+            logger.error("modo %s requiere CADVCS_KAFKA_BROKERS y kafka-python",
+                         args.mode)
+            return 2
+        if args.mode == "relay":
+            total = 0
+            for repo in _iter_repos(args.repo):
+                total += busmod.relay_once(repo, b)
+            logger.info("relay: %d eventos publicados", total)
+        else:  # consume
+            from .repo import Repo, REPO_DIR
+            def resolver(repo_key):
+                root = DATA_DIR / repo_key
+                return Repo(root) if (root / REPO_DIR).exists() else None
+            handler = busmod.make_handler(resolver)
+            n = b.consume(busmod.TOPIC, "cadvcs-workers", handler,
+                          max_messages=None if not args.once else args.batch)
+            logger.info("consume: %d eventos procesados", n)
+        return 0
 
     if args.once:
         totals = drain_once(args.repo, args.batch)

@@ -239,7 +239,9 @@ class Repo:
                 sha, size = staged[rp]["blob_sha"], staged[rp]["size_bytes"]
                 entries[rp] = (sha, size)
                 if rp.lower().endswith(".dxf"):
-                    to_index.append(sha)
+                    to_index.append((sha, "index"))
+                elif rp.lower().endswith(".dwg"):
+                    to_index.append((sha, "convert"))
                 continue
             fs_path = self.root / rp
             if not fs_path.exists():
@@ -254,7 +256,9 @@ class Repo:
             sha, size = self.store.put(fs_path)
             entries[rp] = (sha, size)
             if fs_path.suffix.lower() == ".dxf":
-                to_index.append(sha)
+                to_index.append((sha, "index"))
+            elif fs_path.suffix.lower() == ".dwg":
+                to_index.append((sha, "convert"))
 
         with self.conn:
             cid = self.conn.insert_id(
@@ -269,14 +273,19 @@ class Repo:
             # no se encola. El worker lo drena; mientras tanto, la primera
             # lectura vía _entities_for_blob indexa bajo demanda como red de
             # seguridad, así diff/merge/blame nunca esperan al worker.
-            for sha in dict.fromkeys(to_index):  # únicos, orden estable
-                already = self.conn.execute(
-                    "SELECT 1 FROM entities WHERE blob_sha = ? LIMIT 1",
-                    (sha,)).fetchone()
+            for sha, kind in dict.fromkeys(to_index):  # únicos, orden estable
+                if kind == "index":
+                    already = self.conn.execute(
+                        "SELECT 1 FROM entities WHERE blob_sha = ? LIMIT 1",
+                        (sha,)).fetchone()
+                else:  # convert: dedup contra el espejo existente
+                    already = self.conn.execute(
+                        "SELECT 1 FROM dwg_mirrors WHERE dwg_sha = ? LIMIT 1",
+                        (sha,)).fetchone()
                 if not already:
                     self.conn.execute(
-                        "INSERT INTO index_outbox (blob_sha, repo_key) "
-                        "VALUES (?, ?)", (sha, self.root.name))
+                        "INSERT INTO index_outbox (blob_sha, repo_key, kind) "
+                        "VALUES (?, ?, ?)", (sha, self.root.name, kind))
             # Limpiar staging de lo commiteado
             self.conn.execute("DELETE FROM staged")
             # Los archivos borrados dejan de estar tracked
@@ -303,32 +312,74 @@ class Repo:
                   json.dumps(e["attrs"], default=str)) for h, e in ents.items()])
 
     def index_pending(self, limit: int = 100) -> list[dict]:
-        """Eventos de indexado pendientes (para el worker)."""
+        """Eventos pendientes (para el worker), con su kind."""
         rows = self.conn.execute(
-            "SELECT id, blob_sha, attempts FROM index_outbox "
+            "SELECT id, blob_sha, kind, attempts FROM index_outbox "
             "WHERE status = 'pending' ORDER BY id LIMIT ?", (limit,)).fetchall()
         return [dict(r) for r in rows]
 
-    def index_one(self, event_id: int, blob_sha: str) -> bool:
-        """Procesa un evento: materializa el blob, lo indexa y marca done.
+    def dwg_mirror(self, dwg_sha: str) -> str | None:
+        """SHA del DXF espejo de un DWG, o None si aún no se ha convertido."""
+        row = self.conn.execute(
+            "SELECT dxf_sha FROM dwg_mirrors WHERE dwg_sha = ?",
+            (dwg_sha,)).fetchone()
+        return row["dxf_sha"] if row else None
 
-        Idempotente: si el blob ya está indexado, solo cierra el evento.
-        Devuelve True si tuvo éxito; ante error incrementa attempts y deja
-        el evento pendiente para reintento.
+    def _convert_dwg(self, dwg_sha: str) -> str:
+        """Convierte un DWG (por SHA) a DXF, guarda el espejo en el store y
+        registra la relación. Devuelve el dxf_sha. Indexa el DXF espejo."""
+        from . import convert
+        converter = convert.get_converter()
+        if not converter.available():
+            raise convert.ConversionUnavailable(
+                f"conversor '{converter.name}' no disponible")
+        with tempfile.NamedTemporaryFile(suffix=".dwg", delete=False) as t1:
+            dwg_path = Path(t1.name)
+        dxf_path = dwg_path.with_suffix(".dxf")
+        try:
+            self.store.get(dwg_sha, dwg_path)
+            converter.to_dxf(dwg_path, dxf_path)
+            # Inyectar GUIDs al espejo para identidad estable de entidades
+            doc = ezdxf.readfile(dxf_path)
+            if identity.ensure_guids(doc):
+                doc.saveas(dxf_path)
+            dxf_sha, _ = self.store.put(dxf_path)
+            self._index_blob(dxf_sha, dxf_path)
+            with self.conn:
+                self.conn.execute(
+                    "INSERT OR IGNORE INTO dwg_mirrors "
+                    "(dwg_sha, dxf_sha, converter) VALUES (?, ?, ?)",
+                    (dwg_sha, dxf_sha, converter.name))
+            return dxf_sha
+        finally:
+            dwg_path.unlink(missing_ok=True)
+            dxf_path.unlink(missing_ok=True)
+
+    def index_one(self, event_id: int, blob_sha: str, kind: str = "index") -> bool:
+        """Procesa un evento del outbox según su kind.
+
+        'index'  → extrae entidades del DXF (idempotente).
+        'convert'→ DWG→DXF espejo + index del espejo (idempotente: si ya
+                   hay espejo, solo cierra el evento).
+        Ante error incrementa attempts y deja el evento pendiente.
         """
         try:
-            already = self.conn.execute(
-                "SELECT 1 FROM entities WHERE blob_sha = ? LIMIT 1",
-                (blob_sha,)).fetchone()
-            if not already:
-                with tempfile.NamedTemporaryFile(suffix=".dxf",
-                                                 delete=False) as tmp:
-                    tmp_path = Path(tmp.name)
-                try:
-                    self.store.get(blob_sha, tmp_path)
-                    self._index_blob(blob_sha, tmp_path)
-                finally:
-                    tmp_path.unlink(missing_ok=True)
+            if kind == "convert":
+                if not self.dwg_mirror(blob_sha):
+                    self._convert_dwg(blob_sha)
+            else:
+                already = self.conn.execute(
+                    "SELECT 1 FROM entities WHERE blob_sha = ? LIMIT 1",
+                    (blob_sha,)).fetchone()
+                if not already:
+                    with tempfile.NamedTemporaryFile(suffix=".dxf",
+                                                     delete=False) as tmp:
+                        tmp_path = Path(tmp.name)
+                    try:
+                        self.store.get(blob_sha, tmp_path)
+                        self._index_blob(blob_sha, tmp_path)
+                    finally:
+                        tmp_path.unlink(missing_ok=True)
             with self.conn:
                 self.conn.execute(
                     "UPDATE index_outbox SET status = 'done' WHERE id = ?",
@@ -345,7 +396,7 @@ class Repo:
         """Drena el outbox de ESTE repo (útil en tests y modo síncrono)."""
         done = failed = 0
         for ev in self.index_pending(limit):
-            if self.index_one(ev["id"], ev["blob_sha"]):
+            if self.index_one(ev["id"], ev["blob_sha"], ev.get("kind", "index")):
                 done += 1
             else:
                 failed += 1
