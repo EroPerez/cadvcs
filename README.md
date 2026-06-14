@@ -209,3 +209,17 @@ El sistema soporta tres servicios de producción, **todos opcionales con degrada
 - **Cache de renders en Redis** (`CADVCS_REDIS_URL`): los SVG de render y diff visual son inmutables (dependen solo de los SHAs de contenido), así que se cachean por clave de SHAs sin invalidación. Sin Redis, se recomputa. Spec 18.
 
 `docker-compose.yml` levanta el stack completo (PostgreSQL, Redis, Kafka en KRaft, API, relay, consumer). `/health` reporta el estado de cada pieza. Suite en `test_infra.py` (Redis real, bus Kafka en memoria, stub converter), en CI sobre ambos backends.
+
+## Sesión y alias del CLI
+
+El comando es `cadvcs` (instalado por `pip install -e .`), con alias corto `cad`. Para no pegar el token a mano en cada uso:
+
+```bash
+cad login --token <JWT>           # pegar una vez; se guarda en ~/.config/cadvcs
+cad login --user ana              # o password grant contra el IdP OIDC (pide contraseña)
+cad whoami                        # muestra usuario, roles y caducidad del token
+cad token                         # imprime el JWT (p.ej. curl -H "Authorization: Bearer $(cad token)")
+cad logout                        # borra la sesión
+```
+
+El token se guarda por servidor (`--server`, o `CADVCS_SERVER`) con permisos `0600`, así que puedes tener sesiones contra varios despliegues. Además, tras `login` los comandos que registran autoría (`commit`, `merge`, `lock`...) ya **no necesitan `--user`**: lo toman del token (o de `CADVCS_USER`). Solo lo pides si quieres commitear con otra identidad.

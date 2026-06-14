@@ -93,11 +93,40 @@ python -m cadvcs.cli --help
 
 Si ves una lista de comandos (`init`, `commit`, `log`, `merge`...), ¡lo tienes funcionando! 🎉
 
+> **Atajo para escribir menos:** al instalar, también quedan listos dos comandos cortos, `cadvcs` y su alias aún más breve `cad`. O sea, en vez de `python -m cadvcs.cli commit ...` puedes escribir simplemente `cad commit ...`. En el resto de la guía usaremos `cad` por comodidad; si por lo que sea no te funciona, vuelve a `python -m cadvcs.cli`.
+
 ---
 
 ## 4. Tu primer proyecto (la forma más sencilla, sin nada extra)
 
 Esta es la manera más simple de usar cadvcs: desde la terminal, sin base de datos ni servidores. Todo se guarda en archivos en tu disco. Perfecto para aprender y para uso personal.
+
+### Paso 4.0 — Decir quién eres (una sola vez)
+
+cadvcs anota quién hace cada cambio, así que necesita saber tu nombre. Para no repetirlo en cada comando, díselo una vez. Tienes dos formas, elige la que prefieras:
+
+**Opción sencilla (trabajo local, tú solo):** define una variable con tu nombre.
+
+```bash
+# Mac/Linux:
+export CADVCS_USER=tu_nombre
+# Windows (PowerShell):
+$env:CADVCS_USER = "tu_nombre"
+```
+
+(Esto vale mientras la terminal esté abierta. Para que sea permanente, se pone en el archivo de configuración de tu terminal, pero no te preocupes por eso ahora.)
+
+**Opción con servidor (si usas el sistema completo de la sección 5):** inicia sesión y tu nombre saldrá de tu cuenta automáticamente.
+
+```bash
+cad login --token TU_TOKEN     # pega tu llave de acceso una vez; se guarda
+# o, si tu organización usa login con usuario y contraseña:
+cad login --user tu_usuario    # te pedirá la contraseña
+```
+
+A partir de ahí, `cad whoami` te dice quién eres, y los comandos como `commit` ya saben tu nombre sin que se lo repitas. Para cerrar sesión: `cad logout`.
+
+Si te saltas este paso, no pasa nada: cadvcs simplemente te pedirá un `--user tu_nombre` cuando lo necesite.
 
 ### Paso 4.1 — Crear el repositorio
 
@@ -106,7 +135,7 @@ Haz una carpeta para tu proyecto y entra en ella:
 ```bash
 mkdir mi-proyecto
 cd mi-proyecto
-python -m cadvcs.cli init
+cad init
 ```
 
 `init` (de *initialize*, inicializar) crea la "caja con historia" dentro de esta carpeta. Por dentro aparece una carpeta oculta `.cadvcs` donde cadvcs guarda todo. No la toques a mano; es su cocina.
@@ -116,7 +145,7 @@ python -m cadvcs.cli init
 Copia o crea un archivo `.dxf` en esta carpeta (un plano CAD; cualquier programa de dibujo técnico exporta a ese formato). Digamos que se llama `plano.dxf`. Ahora dile a cadvcs que lo vigile:
 
 ```bash
-python -m cadvcs.cli add plano.dxf
+cad add plano.dxf
 ```
 
 `add` (añadir) significa "quiero que sigas este archivo". Es como poner una foto en el álbum pero todavía sin pegarla.
@@ -124,19 +153,17 @@ python -m cadvcs.cli add plano.dxf
 ### Paso 4.3 — Hacer tu primer commit (la primera foto)
 
 ```bash
-python -m cadvcs.cli commit --user tu_nombre -m "Primera versión del plano"
+cad commit -m "Primera versión del plano"
 ```
 
-`commit` toma la foto y la guarda para siempre. Dos partes importantes:
-- `--user tu_nombre` dice **quién** hace la foto (pon tu nombre, sin espacios: `ana`, `juan_perez`). Es obligatorio, para que quede registrado quién hizo cada cambio.
-- `-m` (de *message*, mensaje) es tu nota explicando qué hay en esta versión.
+`commit` toma la foto y la guarda para siempre. La parte `-m` (de *message*, mensaje) es tu nota explicando qué hay en esta versión. **Pon siempre un mensaje claro**: tu yo del futuro te lo agradecerá.
 
-**Pon siempre un mensaje claro**: tu yo del futuro te lo agradecerá.
+> **¿Y quién hace la foto?** cadvcs necesita saber tu nombre para anotar quién hizo cada cambio. La forma cómoda es decírselo una sola vez (ver la sección 4.0, justo abajo) y olvidarte. Si no lo has hecho, te pedirá que añadas `--user tu_nombre` al comando, así: `cad commit --user ana -m "..."`.
 
 ### Paso 4.4 — Ver la historia
 
 ```bash
-python -m cadvcs.cli log
+cad log
 ```
 
 `log` te muestra la lista de todas las fotos (commits) que has hecho, de la más nueva a la más vieja. Cada una tiene un número (c1, c2, c3...), tu nombre y tu mensaje.
@@ -146,19 +173,19 @@ python -m cadvcs.cli log
 Abre `plano.dxf` en tu programa de CAD, mueve algo, guárdalo. Vuelve a la terminal:
 
 ```bash
-python -m cadvcs.cli status
+cad status
 ```
 
 `status` te dice qué archivos han cambiado desde la última foto. Verás `plano.dxf` en "modificados". Ahora guarda esta nueva versión:
 
 ```bash
-python -m cadvcs.cli commit --user tu_nombre -m "Moví la columna central"
+cad commit -m "Moví la columna central"
 ```
 
 Y mira la diferencia entre las dos versiones:
 
 ```bash
-python -m cadvcs.cli diff 1 2
+cad diff 1 2
 ```
 
 `diff` (de *difference*, diferencia) te dice qué entidades (líneas, círculos...) se añadieron, se borraron o se movieron entre la foto 1 y la foto 2. Esto es magia: no compara los archivos byte a byte, sino las **piezas del dibujo**.
@@ -170,8 +197,8 @@ python -m cadvcs.cli diff 1 2
 ¿Quieres probar un rediseño arriesgado sin estropear lo bueno? Haz una rama:
 
 ```bash
-python -m cadvcs.cli branch idea-nueva
-python -m cadvcs.cli switch idea-nueva
+cad branch idea-nueva
+cad switch idea-nueva
 ```
 
 `branch` crea la línea paralela; `switch` te cambia a ella. Ahora cualquier commit que hagas va a "idea-nueva" y no toca tu trabajo principal (que se llama `main`). Si la idea sale bien, la fusionas; si sale mal, la borras y no ha pasado nada.
@@ -179,7 +206,7 @@ python -m cadvcs.cli switch idea-nueva
 Para volver a lo principal:
 
 ```bash
-python -m cadvcs.cli switch main
+cad switch main
 ```
 
 ### Paso 4.7 — Juntar dos ramas (fusión)
@@ -187,7 +214,7 @@ python -m cadvcs.cli switch main
 Estando en `main`, para traer los cambios de tu rama:
 
 ```bash
-python -m cadvcs.cli merge idea-nueva --user tu_nombre -m "Junto la idea nueva"
+cad merge idea-nueva -m "Junto la idea nueva"
 ```
 
 Igual que en `commit`, la fusión necesita `--user tu_nombre` (quién la hace) y acepta un `-m` con la nota.
@@ -365,12 +392,12 @@ A partir de ahí, cada petición necesita una "llave" (token) válida, y según 
 Trabajando tú solo desde la terminal (sección 4):
 
 ```bash
-python -m cadvcs.cli init                    # crear el repositorio
+cad init                    # crear el repositorio
 python -m cadvcs.cli add ARCHIVO             # empezar a vigilar un archivo
 python -m cadvcs.cli commit --user TU_NOMBRE -m "MENSAJE"   # guardar una foto
-python -m cadvcs.cli status                  # ver qué cambió
-python -m cadvcs.cli log                      # ver la historia
-python -m cadvcs.cli diff 1 2                # comparar versiones 1 y 2 (sin la "c")
+cad status                  # ver qué cambió
+cad log                      # ver la historia
+cad diff 1 2                # comparar versiones 1 y 2 (sin la "c")
 python -m cadvcs.cli branch NOMBRE           # crear una rama
 python -m cadvcs.cli switch NOMBRE           # cambiar de rama
 python -m cadvcs.cli merge NOMBRE --user TU_NOMBRE -m "MENSAJE"  # fusionar

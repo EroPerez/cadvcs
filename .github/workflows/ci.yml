@@ -30,6 +30,8 @@ jobs:
         run: python test_ui.py
       - name: Infra (DWG convert + Redis cache + Kafka relay)
         run: python test_infra.py
+      - name: CLI session management + alias
+        run: python test_cli_auth.py
   property-tests:
     runs-on: ubuntu-latest
     steps:
