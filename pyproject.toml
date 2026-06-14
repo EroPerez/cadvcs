@@ -13,12 +13,12 @@ authors = [{ name = "Erodis Pérez Michel" }]
 dependencies = ["ezdxf>=1.4"]
 
 [project.optional-dependencies]
-api = ["fastapi>=0.110", "uvicorn>=0.29", "pyjwt[crypto]>=2.6"]
+api = ["fastapi>=0.110", "uvicorn>=0.29", "pyjwt[crypto]>=2.6", "Pillow>=10"]
 s3 = ["boto3>=1.34"]
 cache = ["redis>=5"]
 events = ["kafka-python>=2"]
 dwg = ["aspose-cad>=24"]  # requiere licencia Aspose
-dev = ["fastapi>=0.110", "uvicorn>=0.29", "httpx", "pyjwt[crypto]>=2.6", "boto3>=1.34", "moto[s3]>=5", "pytest>=8", "hypothesis>=6", "requests"]
+dev = ["fastapi>=0.110", "uvicorn>=0.29", "httpx", "pyjwt[crypto]>=2.6", "boto3>=1.34", "moto[s3]>=5", "pytest>=8", "hypothesis>=6", "requests", "redis>=5", "fakeredis>=2", "kafka-python>=2", "Pillow>=10"]
 
 [project.scripts]
 cadvcs = "cadvcs.cli:main"
