@@ -14,10 +14,11 @@ import pytest
 
 ROOT = Path(__file__).resolve().parent.parent
 
-SCRIPT_SUITES = ["demo.py", "test_api.py"]
+# Rutas relativas a ROOT. demo.py vive en el root; los test_*.py en tests/.
+SCRIPT_SUITES = ["demo.py", "tests/test_api.py"]
 OPTIONAL_SUITES = {
-    "test_s3.py": "moto",
-    "test_presigned.py": "moto.moto_server.threaded_moto_server",
+    "tests/test_s3.py": "moto",
+    "tests/test_presigned.py": "moto.moto_server.threaded_moto_server",
 }
 
 

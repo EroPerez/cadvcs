@@ -77,7 +77,7 @@ check("token vigente no marcado como caducado", not auth_store.is_expired(tok1))
 # ---- 3. alias cad == cadvcs ------------------------------------------------
 # Sin tomllib (no existe en 3.10): comprobamos las líneas del [project.scripts].
 import re
-pyproject = Path("pyproject.toml").read_text()
+pyproject = (Path(__file__).resolve().parent.parent / "pyproject.toml").read_text()
 scripts_block = pyproject.split("[project.scripts]", 1)[1].split("[", 1)[0]
 entries = dict(re.findall(r'(\w+)\s*=\s*"([^"]+)"', scripts_block))
 check("alias 'cad' apunta al mismo entry-point que 'cadvcs'",
