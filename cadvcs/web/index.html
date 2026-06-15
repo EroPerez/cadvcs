@@ -1,190 +1,550 @@
 <!DOCTYPE html>
-<html lang="es">
+<html lang="es" data-color-mode="light" data-light-theme="light">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>cadvcs · control de versiones de planos</title>
 <style>
-  /* — Tokens: mesa de dibujo —
-     paper workspace · ink azul-negro estructural · cianotipo · rojo de
-     revisión (semántico: eliminado/conflicto). Mono para todo dato. */
+  /* — Primer-inspired design tokens — */
   :root {
-    --paper: #fbfaf7;
-    --vellum: #f2efe7;
-    --hairline: #d8d4c8;
-    --ink: #14202e;
-    --ink-soft: #5a6675;
-    --blueprint: #1c4b8c;
-    --revision: #c8312b;
-    --added: #16a34a;
-    --modified: #d97706;
-    --shadow: 0 1px 0 var(--hairline);
-    --ui: ui-sans-serif, "Helvetica Neue", Arial, sans-serif;
-    --mono: ui-monospace, "SF Mono", "JetBrains Mono", Menlo, monospace;
+    --color-fg-default: #1f2328;
+    --color-fg-muted: #656d76;
+    --color-fg-subtle: #6e7781;
+    --color-fg-on-emphasis: #ffffff;
+    --color-canvas-default: #ffffff;
+    --color-canvas-subtle: #f6f8fa;
+    --color-canvas-inset: #f6f8fa;
+    --color-border-default: #d0d7de;
+    --color-border-muted: #d8dee4;
+    --color-border-subtle: rgba(31,35,40,0.15);
+    --color-neutral-emphasis-plus: #24292f;
+    --color-neutral-emphasis: #6e7781;
+    --color-neutral-muted: rgba(175,184,193,0.2);
+    --color-neutral-subtle: rgba(234,238,242,0.5);
+    --color-accent-fg: #0969da;
+    --color-accent-emphasis: #0969da;
+    --color-accent-muted: rgba(84,174,255,0.4);
+    --color-accent-subtle: #ddf4ff;
+    --color-success-fg: #1a7f37;
+    --color-success-emphasis: #1f883d;
+    --color-success-subtle: #dafbe1;
+    --color-danger-fg: #d1242f;
+    --color-danger-emphasis: #cf222e;
+    --color-danger-subtle: #ffebe9;
+    --color-attention-fg: #9a6700;
+    --color-attention-emphasis: #9a6700;
+    --color-attention-subtle: #fff8c5;
+    --color-done-fg: #8250df;
+    --font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Noto Sans", Helvetica, Arial, sans-serif, "Apple Color Emoji", "Segoe UI Emoji";
+    --font-mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
+    --font-size-small: 12px;
+    --font-size-normal: 14px;
+    --border-radius: 6px;
+    --border-radius-sm: 4px;
+    --shadow-sm: 0 1px 0 rgba(31,35,40,0.04);
+    --shadow-md: 0 3px 6px rgba(140,149,159,0.15);
+    --shadow-lg: 0 8px 24px rgba(140,149,159,0.2);
   }
+
   * { box-sizing: border-box; }
   html, body { height: 100%; margin: 0; }
   body {
-    font-family: var(--ui); color: var(--ink); background: var(--paper);
-    font-size: 14px; line-height: 1.5;
-    display: grid; grid-template-rows: auto 1fr;
+    font-family: var(--font-family);
+    color: var(--color-fg-default);
+    background: var(--color-canvas-default);
+    font-size: var(--font-size-normal);
+    line-height: 1.5;
+    display: grid;
+    grid-template-rows: auto 1fr;
   }
+
   @media (prefers-reduced-motion: no-preference) {
-    .fade { animation: fade .18s ease-out; }
-    @keyframes fade { from { opacity: 0; transform: translateY(2px); } }
+    .fade { animation: fade .15s ease-out; }
+    @keyframes fade { from { opacity: 0; transform: translateY(4px); } }
   }
 
-  /* — Top bar — */
+  /* — Header (GitHub-style top nav) — */
   header {
-    display: flex; align-items: baseline; gap: 16px;
-    padding: 12px 18px; border-bottom: 1px solid var(--hairline);
-    background: var(--paper);
+    display: flex;
+    align-items: center;
+    gap: 16px;
+    padding: 0 16px;
+    height: 48px;
+    background: var(--color-neutral-emphasis-plus);
+    color: var(--color-fg-on-emphasis);
+    font-size: var(--font-size-normal);
   }
-  .brand { font-weight: 700; letter-spacing: .02em; font-size: 16px; }
-  .brand b { color: var(--blueprint); }
-  .brand .rev { color: var(--revision); }
+  .brand {
+    font-weight: 600;
+    font-size: 16px;
+    letter-spacing: -0.01em;
+    color: var(--color-fg-on-emphasis);
+    display: flex;
+    align-items: center;
+    gap: 6px;
+  }
+  .brand svg { fill: var(--color-fg-on-emphasis); }
+  .brand .rev { color: rgba(255,255,255,0.7); font-size: 13px; font-weight: 400; }
   header .spacer { flex: 1; }
-  .token-field { display: flex; align-items: center; gap: 6px;
-    font-size: 12px; color: var(--ink-soft); }
+  .token-field {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-size: var(--font-size-small);
+    color: rgba(255,255,255,0.7);
+  }
   .token-field input {
-    font-family: var(--mono); font-size: 12px; width: 200px;
-    border: 1px solid var(--hairline); border-radius: 3px; padding: 4px 6px;
-    background: #fff;
+    font-family: var(--font-mono);
+    font-size: 12px;
+    width: 210px;
+    border: 1px solid rgba(255,255,255,0.2);
+    border-radius: var(--border-radius);
+    padding: 5px 10px;
+    background: rgba(255,255,255,0.1);
+    color: var(--color-fg-on-emphasis);
+    outline: none;
+    transition: border-color .15s;
   }
-  .health { font-family: var(--mono); font-size: 11px; }
-  .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%;
-    vertical-align: middle; margin-right: 5px; }
+  .token-field input::placeholder { color: rgba(255,255,255,0.4); }
+  .token-field input:focus {
+    border-color: rgba(255,255,255,0.4);
+    background: rgba(255,255,255,0.15);
+  }
+  .health {
+    font-family: var(--font-mono);
+    font-size: 12px;
+    color: rgba(255,255,255,0.7);
+    display: flex;
+    align-items: center;
+    gap: 4px;
+  }
+  .dot {
+    display: inline-block;
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    vertical-align: middle;
+    margin-right: 4px;
+  }
 
-  /* — App shell: rail · lienzo · contexto — */
-  main { display: grid; grid-template-columns: 240px 1fr 340px; min-height: 0; }
-  .rail, .ctx { border-right: 1px solid var(--hairline);
-    overflow: auto; padding: 14px; }
-  .ctx { border-right: none; border-left: 1px solid var(--hairline);
-    background: var(--vellum); }
-  .canvas { overflow: auto; padding: 18px 22px; min-width: 0; }
+  /* — App shell: sidebar + canvas + context — */
+  main {
+    display: grid;
+    grid-template-columns: 260px 1fr 340px;
+    min-height: 0;
+  }
+  .rail {
+    background: var(--color-canvas-subtle);
+    border-right: 1px solid var(--color-border-muted);
+    overflow-y: auto;
+    padding: 16px;
+  }
+  .ctx {
+    border-left: 1px solid var(--color-border-muted);
+    background: var(--color-canvas-subtle);
+    overflow-y: auto;
+    padding: 16px;
+  }
+  .canvas {
+    overflow: auto;
+    padding: 24px;
+    min-width: 0;
+    background: var(--color-canvas-default);
+  }
 
-  /* — Rail — */
-  .eyebrow { font-size: 11px; text-transform: uppercase; letter-spacing: .09em;
-    color: var(--ink-soft); margin: 16px 0 7px; font-weight: 600; }
+  /* — Sidebar sections — */
+  .eyebrow {
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--color-fg-muted);
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    margin: 20px 0 8px;
+    padding-bottom: 4px;
+  }
   .eyebrow:first-child { margin-top: 0; }
+
   .repo-item, .branch-item {
-    display: flex; align-items: center; gap: 7px; padding: 6px 8px;
-    border-radius: 4px; cursor: pointer; font-size: 13px;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 6px 10px;
+    border-radius: var(--border-radius);
+    cursor: pointer;
+    font-size: 14px;
+    color: var(--color-fg-default);
+    transition: background .1s;
   }
-  .repo-item:hover, .branch-item:hover { background: var(--vellum); }
+  .repo-item:hover, .branch-item:hover {
+    background: var(--color-neutral-muted);
+  }
   .repo-item.active, .branch-item.active {
-    background: var(--ink); color: var(--paper); }
-  .branch-item .cur { color: var(--revision); font-weight: 700; }
-  .repo-item.active .cur { color: #ff9b95; }
-  .mono { font-family: var(--mono); }
-  .muted { color: var(--ink-soft); }
+    background: var(--color-accent-subtle);
+    color: var(--color-accent-fg);
+    font-weight: 600;
+  }
+  .branch-item .cur {
+    color: var(--color-success-fg);
+    font-weight: 700;
+    font-size: 10px;
+  }
+  .repo-item.active .cur { color: var(--color-accent-fg); }
+  .mono { font-family: var(--font-mono); }
+  .muted { color: var(--color-fg-muted); }
 
-  /* — Tabs — */
-  .tabs { display: flex; gap: 2px; border-bottom: 1px solid var(--hairline);
-    margin-bottom: 16px; }
-  .tab { padding: 8px 14px; cursor: pointer; font-size: 13px;
-    border-bottom: 2px solid transparent; color: var(--ink-soft); }
-  .tab.active { color: var(--ink); border-bottom-color: var(--blueprint);
-    font-weight: 600; }
+  /* — Tabs (Primer UnderlineNav) — */
+  .tabs {
+    display: flex;
+    gap: 0;
+    border-bottom: 1px solid var(--color-border-muted);
+    margin-bottom: 20px;
+  }
+  .tab {
+    padding: 10px 16px;
+    cursor: pointer;
+    font-size: 14px;
+    font-weight: 500;
+    color: var(--color-fg-muted);
+    border-bottom: 2px solid transparent;
+    transition: color .15s, border-color .15s;
+    margin-bottom: -1px;
+  }
+  .tab:hover {
+    color: var(--color-fg-default);
+    border-bottom-color: var(--color-neutral-muted);
+  }
+  .tab.active {
+    color: var(--color-fg-default);
+    font-weight: 600;
+    border-bottom-color: var(--color-accent-emphasis);
+  }
 
-  /* — Commit log: una hairline vertical recorre la historia — */
+  /* — Commit log — */
   .log { list-style: none; padding: 0; margin: 0; }
-  .commit { display: grid; grid-template-columns: 80px 1fr auto; gap: 12px;
-    padding: 10px 0; border-bottom: 1px solid var(--hairline); cursor: pointer;
-    align-items: baseline; }
-  .commit:hover { background: var(--vellum); }
-  .commit .cid { font-family: var(--mono); color: var(--blueprint);
-    font-weight: 600; }
-  .commit .cid.merge { color: var(--revision); }
-  .commit .msg { min-width: 0; }
-  .commit .who { font-size: 12px; color: var(--ink-soft);
-    font-family: var(--mono); white-space: nowrap; }
-  .deco { display: inline-block; font-family: var(--mono); font-size: 11px;
-    border: 1px solid var(--blueprint); color: var(--blueprint);
-    border-radius: 3px; padding: 0 5px; margin-left: 6px; }
-  .deco.tag { border-color: var(--revision); color: var(--revision); }
+  .commit {
+    display: grid;
+    grid-template-columns: 72px 1fr auto;
+    gap: 12px;
+    padding: 10px 12px;
+    border-bottom: 1px solid var(--color-border-muted);
+    cursor: pointer;
+    align-items: center;
+    border-radius: 0;
+    transition: background .1s;
+  }
+  .commit:hover { background: var(--color-canvas-subtle); }
+  .commit .cid {
+    font-family: var(--font-mono);
+    font-size: var(--font-size-small);
+    color: var(--color-accent-fg);
+    font-weight: 600;
+    background: var(--color-accent-subtle);
+    padding: 2px 8px;
+    border-radius: 20px;
+    text-align: center;
+    white-space: nowrap;
+  }
+  .commit .cid.merge {
+    color: var(--color-done-fg);
+    background: #fbefff;
+  }
+  .commit .msg {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    font-size: 14px;
+  }
+  .commit .who {
+    font-size: var(--font-size-small);
+    color: var(--color-fg-muted);
+    font-family: var(--font-mono);
+    white-space: nowrap;
+  }
+
+  .deco {
+    display: inline-block;
+    font-family: var(--font-mono);
+    font-size: 11px;
+    background: var(--color-accent-subtle);
+    color: var(--color-accent-fg);
+    border: 1px solid var(--color-accent-muted);
+    border-radius: 20px;
+    padding: 0 8px;
+    margin-left: 8px;
+    line-height: 20px;
+    vertical-align: middle;
+    font-weight: 600;
+  }
+  .deco.tag {
+    background: var(--color-attention-subtle);
+    color: var(--color-attention-fg);
+    border-color: rgba(154,103,0,0.2);
+  }
 
   /* — Drawing viewport — */
-  .viewport { border: 1px solid var(--hairline); background: #fff;
-    border-radius: 4px; padding: 10px; min-height: 220px;
-    display: flex; align-items: center; justify-content: center; }
-  .viewport svg { max-width: 100%; height: auto; }
-  .legend { display: flex; gap: 16px; font-size: 12px; margin: 10px 0 0;
-    font-family: var(--mono); color: var(--ink-soft); flex-wrap: wrap; }
-  .legend span::before { content: ""; display: inline-block; width: 10px;
-    height: 10px; margin-right: 5px; vertical-align: middle; border-radius: 2px; }
-  .lg-add::before { background: var(--added); }
-  .lg-mod::before { background: var(--modified); }
-  .lg-del::before { background: var(--revision); }
-
-  /* — Controls — */
-  label.fld { display: block; font-size: 12px; color: var(--ink-soft);
-    margin: 12px 0 4px; }
-  select, input.txt, textarea {
-    width: 100%; border: 1px solid var(--hairline); border-radius: 4px;
-    padding: 7px 9px; font-family: var(--ui); font-size: 13px; background: #fff;
+  .viewport {
+    border: 1px solid var(--color-border-default);
+    background: var(--color-canvas-default);
+    border-radius: var(--border-radius);
+    padding: 16px;
+    min-height: 240px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
   }
-  textarea { font-family: var(--mono); resize: vertical; min-height: 56px; }
-  .btn { display: inline-flex; align-items: center; gap: 6px; cursor: pointer;
-    border: 1px solid var(--ink); background: var(--ink); color: var(--paper);
-    border-radius: 4px; padding: 7px 13px; font-size: 13px; font-weight: 600; }
-  .btn:hover { background: #243646; }
-  .btn.ghost { background: transparent; color: var(--ink); }
-  .btn.ghost:hover { background: var(--vellum); }
-  .btn.danger { border-color: var(--revision); background: var(--revision); }
-  .btn.danger:hover { background: #a8271f; }
-  .btn.sm { padding: 4px 9px; font-size: 12px; }
-  .row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+  .viewport svg { max-width: 100%; height: auto; }
+  .legend {
+    display: flex;
+    gap: 16px;
+    font-size: var(--font-size-small);
+    margin: 12px 0 0;
+    font-family: var(--font-mono);
+    color: var(--color-fg-muted);
+    flex-wrap: wrap;
+  }
+  .legend span::before {
+    content: "";
+    display: inline-block;
+    width: 10px;
+    height: 10px;
+    margin-right: 6px;
+    vertical-align: middle;
+    border-radius: 2px;
+  }
+  .lg-add::before { background: var(--color-success-emphasis); }
+  .lg-mod::before { background: var(--color-attention-emphasis); }
+  .lg-del::before { background: var(--color-danger-emphasis); }
 
-  /* — Tablas de datos (blame, locks) — */
-  table { width: 100%; border-collapse: collapse; font-size: 13px; }
-  th { text-align: left; font-size: 11px; text-transform: uppercase;
-    letter-spacing: .07em; color: var(--ink-soft); padding: 6px 8px;
-    border-bottom: 1px solid var(--hairline); }
-  td { padding: 6px 8px; border-bottom: 1px solid var(--hairline);
-    font-family: var(--mono); font-size: 12px; }
+  /* — Form controls (Primer-style) — */
+  label.fld {
+    display: block;
+    font-size: var(--font-size-small);
+    font-weight: 600;
+    color: var(--color-fg-default);
+    margin: 12px 0 4px;
+  }
+  select, input.txt, textarea {
+    width: 100%;
+    border: 1px solid var(--color-border-default);
+    border-radius: var(--border-radius);
+    padding: 5px 12px;
+    font-family: var(--font-family);
+    font-size: var(--font-size-normal);
+    background: var(--color-canvas-default);
+    color: var(--color-fg-default);
+    line-height: 20px;
+    outline: none;
+    box-shadow: var(--shadow-sm);
+    transition: border-color .15s, box-shadow .15s;
+  }
+  select:focus, input.txt:focus, textarea:focus {
+    border-color: var(--color-accent-emphasis);
+    box-shadow: 0 0 0 3px var(--color-accent-muted);
+  }
+  textarea {
+    font-family: var(--font-mono);
+    resize: vertical;
+    min-height: 60px;
+  }
 
-  /* — SIGNATURE: el resolutor de conflictos — */
-  .conflict { border: 1px solid var(--revision); border-radius: 5px;
-    margin: 12px 0; overflow: hidden; }
-  .conflict-head { background: var(--revision); color: #fff; padding: 7px 12px;
-    font-family: var(--mono); font-size: 12px; display: flex; gap: 10px;
-    align-items: center; }
+  /* — Buttons (Primer) — */
+  .btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    cursor: pointer;
+    border: 1px solid rgba(31,35,40,0.15);
+    background: var(--color-success-emphasis);
+    color: var(--color-fg-on-emphasis);
+    border-radius: var(--border-radius);
+    padding: 5px 16px;
+    font-size: var(--font-size-normal);
+    font-weight: 600;
+    font-family: var(--font-family);
+    line-height: 20px;
+    transition: background .15s;
+    box-shadow: var(--shadow-sm);
+  }
+  .btn:hover { background: #1a8e3a; }
+  .btn.ghost {
+    background: var(--color-canvas-default);
+    color: var(--color-fg-default);
+    border-color: var(--color-border-default);
+    box-shadow: var(--shadow-sm);
+  }
+  .btn.ghost:hover { background: var(--color-canvas-subtle); }
+  .btn.danger {
+    background: var(--color-danger-emphasis);
+    border-color: rgba(31,35,40,0.15);
+  }
+  .btn.danger:hover { background: #b91c1c; }
+  .btn.sm {
+    padding: 3px 12px;
+    font-size: var(--font-size-small);
+  }
+  .row {
+    display: flex;
+    gap: 12px;
+    align-items: center;
+    flex-wrap: wrap;
+  }
+
+  /* — Data tables (blame, locks) — */
+  table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: var(--font-size-normal);
+    border: 1px solid var(--color-border-default);
+    border-radius: var(--border-radius);
+    overflow: hidden;
+  }
+  th {
+    text-align: left;
+    font-size: var(--font-size-small);
+    font-weight: 600;
+    color: var(--color-fg-default);
+    padding: 8px 12px;
+    background: var(--color-canvas-subtle);
+    border-bottom: 1px solid var(--color-border-default);
+  }
+  td {
+    padding: 8px 12px;
+    border-bottom: 1px solid var(--color-border-muted);
+    font-family: var(--font-mono);
+    font-size: var(--font-size-small);
+    color: var(--color-fg-default);
+  }
+  tr:last-child td { border-bottom: none; }
+
+  /* — Conflict resolver (SIGNATURE) — */
+  .conflict {
+    border: 1px solid var(--color-border-default);
+    border-radius: var(--border-radius);
+    margin: 12px 0;
+    overflow: hidden;
+    box-shadow: var(--shadow-sm);
+  }
+  .conflict-head {
+    background: var(--color-danger-emphasis);
+    color: var(--color-fg-on-emphasis);
+    padding: 8px 14px;
+    font-family: var(--font-mono);
+    font-size: var(--font-size-small);
+    display: flex;
+    gap: 10px;
+    align-items: center;
+  }
   .conflict-head .cloud { font-weight: 700; }
-  .sides { display: grid; grid-template-columns: 1fr 1fr; }
-  .side { padding: 10px 12px; cursor: pointer; border: 2px solid transparent; }
-  .side:first-child { border-right: 1px solid var(--hairline); }
-  .side:hover { background: var(--vellum); }
-  .side.picked { border-color: var(--blueprint); background: #eaf1fb; }
-  .side .role { font-size: 11px; text-transform: uppercase; letter-spacing: .08em;
-    color: var(--ink-soft); font-weight: 700; }
-  .side .val { font-family: var(--mono); font-size: 12px; margin-top: 4px;
-    word-break: break-all; }
-  .side.picked .role { color: var(--blueprint); }
+  .sides {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+  }
+  .side {
+    padding: 12px 14px;
+    cursor: pointer;
+    border: 2px solid transparent;
+    transition: background .1s, border-color .15s;
+  }
+  .side:first-child { border-right: 1px solid var(--color-border-muted); }
+  .side:hover { background: var(--color-canvas-subtle); }
+  .side.picked {
+    border-color: var(--color-accent-emphasis);
+    background: var(--color-accent-subtle);
+  }
+  .side .role {
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    color: var(--color-fg-muted);
+    font-weight: 700;
+  }
+  .side .val {
+    font-family: var(--font-mono);
+    font-size: var(--font-size-small);
+    margin-top: 6px;
+    word-break: break-all;
+    color: var(--color-fg-default);
+  }
+  .side.picked .role { color: var(--color-accent-fg); }
 
-  .toast { position: fixed; bottom: 18px; left: 50%; transform: translateX(-50%);
-    background: var(--ink); color: var(--paper); padding: 10px 18px;
-    border-radius: 5px; font-size: 13px; box-shadow: 0 4px 18px rgba(0,0,0,.25);
-    z-index: 50; max-width: 80vw; }
-  .toast.err { background: var(--revision); }
-  .empty { color: var(--ink-soft); padding: 40px 0; text-align: center; }
-  .empty b { color: var(--ink); display: block; font-size: 15px;
-    margin-bottom: 4px; }
-  h2 { font-size: 15px; margin: 0 0 4px; }
-  .ctx h2 { border-bottom: 1px solid var(--hairline); padding-bottom: 8px; }
-  details summary { cursor: pointer; font-size: 13px; padding: 4px 0;
-    font-weight: 600; }
+  /* — Toast (Primer flash) — */
+  .toast {
+    position: fixed;
+    bottom: 20px;
+    left: 50%;
+    transform: translateX(-50%);
+    background: var(--color-neutral-emphasis-plus);
+    color: var(--color-fg-on-emphasis);
+    padding: 12px 20px;
+    border-radius: var(--border-radius);
+    font-size: var(--font-size-normal);
+    font-weight: 500;
+    box-shadow: var(--shadow-lg);
+    z-index: 50;
+    max-width: 80vw;
+  }
+  .toast.err {
+    background: var(--color-danger-emphasis);
+  }
+
+  /* — Empty state (Primer blankslate) — */
+  .empty {
+    color: var(--color-fg-muted);
+    padding: 48px 24px;
+    text-align: center;
+    border: 1px dashed var(--color-border-muted);
+    border-radius: var(--border-radius);
+    background: var(--color-canvas-subtle);
+  }
+  .empty b {
+    color: var(--color-fg-default);
+    display: block;
+    font-size: 16px;
+    margin-bottom: 4px;
+  }
+
+  h2 {
+    font-size: 16px;
+    font-weight: 600;
+    margin: 0 0 8px;
+  }
+  .ctx h2 {
+    border-bottom: 1px solid var(--color-border-muted);
+    padding-bottom: 10px;
+    margin-bottom: 12px;
+  }
+
+  details summary {
+    cursor: pointer;
+    font-size: 14px;
+    padding: 4px 0;
+    font-weight: 600;
+    color: var(--color-fg-default);
+  }
+
+  /* — Scrollbar styling — */
+  .rail::-webkit-scrollbar, .ctx::-webkit-scrollbar, .canvas::-webkit-scrollbar {
+    width: 8px;
+  }
+  .rail::-webkit-scrollbar-thumb, .ctx::-webkit-scrollbar-thumb, .canvas::-webkit-scrollbar-thumb {
+    background: var(--color-neutral-muted);
+    border-radius: 4px;
+  }
 </style>
 </head>
 <body>
 <header>
-  <span class="brand"><b>cad</b>vcs <span class="rev">▴</span></span>
-  <span class="muted" style="font-size:12px">control de versiones de planos</span>
+  <span class="brand">
+    <svg height="20" viewBox="0 0 24 24" width="20"><path d="M3 3h7v7H3zm11 0h7v7h-7zM3 14h7v7H3zm14 3.5a3.5 3.5 0 1 1-7 0 3.5 3.5 0 0 1 7 0z" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/></svg>
+    cadvcs
+    <span class="rev">control de versiones de planos</span>
+  </span>
   <span class="spacer"></span>
-  <span class="health" id="health"><span class="dot" style="background:#ccc"></span>…</span>
+  <span class="health" id="health"><span class="dot" style="background:#6e7781"></span>...</span>
   <span class="token-field">
-    token
-    <input id="token" placeholder="Bearer JWT (vacío en modo dev)" spellcheck="false">
+    Token
+    <input id="token" placeholder="Bearer JWT (vacio en modo dev)" spellcheck="false">
   </span>
 </header>
 
@@ -192,7 +552,7 @@
   <nav class="rail">
     <div class="eyebrow">Repositorios</div>
     <div id="repos"></div>
-    <div class="row" style="margin-top:8px">
+    <div class="row" style="margin-top:10px">
       <input class="txt mono" id="newRepo" placeholder="nombre" style="flex:1">
       <button class="btn sm" id="createRepo">Crear</button>
     </div>
@@ -207,14 +567,14 @@
   <section class="canvas">
     <div id="placeholder" class="empty">
       <b>Elige un repositorio</b>
-      Su historial, planos y conflictos aparecerán aquí.
+      Su historial, planos y conflictos apareceran aqui.
     </div>
     <div id="workspace" style="display:none">
       <div class="tabs">
         <div class="tab active" data-view="log">Historial</div>
         <div class="tab" data-view="diff">Comparar</div>
         <div class="tab" data-view="merge">Fusionar</div>
-        <div class="tab" data-view="blame">Autoría</div>
+        <div class="tab" data-view="blame">Autoria</div>
         <div class="tab" data-view="locks">Bloqueos</div>
       </div>
       <div id="view" class="fade"></div>
@@ -222,13 +582,13 @@
   </section>
 
   <aside class="ctx" id="ctx">
-    <div class="empty muted">Sin selección</div>
+    <div class="empty muted" style="border:none;background:transparent;padding:32px 16px">Sin seleccion</div>
   </aside>
 </main>
 
 <script>
 "use strict";
-// ——— Estado mínimo en memoria ———
+// ——— Estado minimo en memoria ———
 const S = { repo: null, branch: null, view: "log", repoInfo: null };
 const $ = (s, r=document) => r.querySelector(s);
 const el = (t, props={}, ...kids) => {
@@ -237,7 +597,6 @@ const el = (t, props={}, ...kids) => {
   return n;
 };
 
-// Token en sessionStorage para sobrevivir recargas (no es un artifact)
 const tokenInput = $("#token");
 tokenInput.value = sessionStorage.getItem("cadvcs_token") || "";
 tokenInput.addEventListener("change", () =>
@@ -264,7 +623,7 @@ async function api(path, opts={}) {
   return data;
 }
 async function svgInto(node, path) {
-  node.innerHTML = '<span class="muted">renderizando…</span>';
+  node.innerHTML = '<span class="muted">renderizando...</span>';
   try {
     const headers = {};
     const tok = tokenInput.value.trim();
@@ -289,11 +648,11 @@ async function refreshHealth() {
     const ok = d.status === "ok";
     h.innerHTML = "";
     h.append(el("span", { className: "dot",
-      style: "background:" + (ok ? "#16a34a" : "#c8312b") }));
+      style: "background:" + (ok ? "#3fb950" : "#f85149") }));
     h.append(document.createTextNode(
       d.backend + " · " + d.blob_backend + (ok ? "" : " · degradado")));
   } catch (e) {
-    h.innerHTML = '<span class="dot" style="background:#c8312b"></span>API no disponible';
+    h.innerHTML = '<span class="dot" style="background:#f85149"></span>API no disponible';
   }
 }
 
@@ -303,7 +662,7 @@ async function loadRepos() {
   let repos = [];
   try { repos = await api("/repos"); }
   catch (e) { box.append(el("div", { className: "muted", textContent: e.message })); return; }
-  if (!repos.length) box.append(el("div", { className: "muted", textContent: "ninguno aún" }));
+  if (!repos.length) box.append(el("div", { className: "muted", style: "padding:8px 10px;font-size:13px", textContent: "ninguno aun" }));
   for (const r of repos) {
     const item = el("div", { className: "repo-item" + (r.name === S.repo ? " active" : "") });
     item.append(el("span", {}, r.name));
@@ -349,10 +708,10 @@ async function loadBranches() {
       bb.append(it);
     }
     const tags = await api("/repos/" + S.repo + "/tags");
-    if (!tags.length) tb.append(el("div", { className: "muted", textContent: "ninguna" }));
+    if (!tags.length) tb.append(el("div", { className: "muted", style: "padding:6px 10px;font-size:13px", textContent: "ninguna" }));
     for (const t of tags) {
       const it = el("div", { className: "branch-item" });
-      it.append(el("span", { className: "mono rev", textContent: "⚑" }));
+      it.append(el("span", { className: "mono", style: "color:var(--color-attention-fg)", textContent: "⚑" }));
       it.append(el("span", {}, t.name));
       it.append(el("span", { className: "muted mono", style: "margin-left:auto;font-size:11px",
         textContent: "c" + t.commit_id }));
@@ -409,10 +768,10 @@ async function viewLog() {
 
 async function showCommit(c) {
   const ctx = $("#ctx"); ctx.innerHTML = "";
-  ctx.append(el("h2", {}, "Commit c" + c.id + (c.is_merge ? " · fusión" : "")));
+  ctx.append(el("h2", {}, "Commit c" + c.id + (c.is_merge ? " · fusion" : "")));
   ctx.append(el("div", { className: "muted mono", style: "font-size:12px;margin-bottom:10px" },
     c.author + " · " + c.created_at));
-  ctx.append(el("p", {}, c.message || "(sin mensaje)"));
+  ctx.append(el("p", { style: "margin:0 0 12px" }, c.message || "(sin mensaje)"));
   const lineage = [c.parent_id, c.parent2_id].filter(Boolean).map(p => "c" + p).join(", ");
   if (lineage) ctx.append(el("div", { className: "muted mono", style: "font-size:12px" },
     "padre(s): " + lineage));
@@ -420,17 +779,17 @@ async function showCommit(c) {
   if (c.parent_id == null) return;
   try {
     const d = await api("/repos/" + S.repo + "/diff?ref_a=" + c.parent_id + "&ref_b=" + c.id);
-    const container = el("div", { style: "margin-top:14px" });
+    const container = el("div", { style: "margin-top:16px" });
     container.append(el("div", { className: "eyebrow" }, "Cambios"));
-    for (const p of d.added) container.append(el("div", { className: "mono", style: "color:var(--added);font-size:12px" }, "+ " + p));
-    for (const p of d.removed) container.append(el("div", { className: "mono", style: "color:var(--revision);font-size:12px" }, "− " + p));
+    for (const p of d.added) container.append(el("div", { className: "mono", style: "color:var(--color-success-fg);font-size:12px;padding:2px 0" }, "+ " + p));
+    for (const p of d.removed) container.append(el("div", { className: "mono", style: "color:var(--color-danger-fg);font-size:12px;padding:2px 0" }, "− " + p));
     for (const [p, detail] of Object.entries(d.modified)) {
-      container.append(el("div", { className: "mono", style: "color:var(--modified);font-size:12px" }, "~ " + p));
+      container.append(el("div", { className: "mono", style: "color:var(--color-attention-fg);font-size:12px;padding:2px 0" }, "~ " + p));
       if (detail && detail !== "binary") {
         const sub = el("div", { style: "padding-left:16px;font-size:11px" });
-        if (detail.added && detail.added.length) sub.append(el("span", { className: "mono", style: "color:var(--added)" }, "+" + detail.added.length + " entidades  "));
-        if (detail.removed && detail.removed.length) sub.append(el("span", { className: "mono", style: "color:var(--revision)" }, "−" + detail.removed.length + " entidades  "));
-        if (detail.modified && detail.modified.length) sub.append(el("span", { className: "mono", style: "color:var(--modified)" }, "~" + detail.modified.length + " entidades"));
+        if (detail.added && detail.added.length) sub.append(el("span", { className: "mono", style: "color:var(--color-success-fg)" }, "+" + detail.added.length + " entidades  "));
+        if (detail.removed && detail.removed.length) sub.append(el("span", { className: "mono", style: "color:var(--color-danger-fg)" }, "−" + detail.removed.length + " entidades  "));
+        if (detail.modified && detail.modified.length) sub.append(el("span", { className: "mono", style: "color:var(--color-attention-fg)" }, "~" + detail.modified.length + " entidades"));
         if (sub.childNodes.length) container.append(sub);
       }
     }
@@ -449,7 +808,7 @@ async function viewDiff() {
   const pathSel = el("select");
   wrap.append(el("div", { className: "row" },
     labelled("Base", selA), labelled("Comparar con", selB), labelled("Plano", pathSel)));
-  const summary = el("div", { className: "muted mono", style: "margin:12px 0" });
+  const summary = el("div", { className: "muted mono", style: "margin:14px 0" });
   const vp = el("div", { className: "viewport" });
   wrap.append(summary, vp, el("div", { className: "legend" },
     el("span", { className: "lg-add" }, "añadido"),
@@ -468,7 +827,7 @@ async function viewDiff() {
       if (Object.keys(d.modified).length) parts.push("~" + Object.keys(d.modified).length);
       summary.textContent = parts.length ? ("archivos: " + parts.join("  ")) : "sin diferencias";
       for (const p of dxf) pathSel.append(el("option", { value: p, textContent: p }));
-      if (!dxf.length) { vp.innerHTML = '<span class="muted">ningún DXF modificado entre estas refs</span>'; }
+      if (!dxf.length) { vp.innerHTML = '<span class="muted">ningun DXF modificado entre estas refs</span>'; }
       else renderVisual();
     } catch (e) { summary.textContent = e.message; }
   }
@@ -480,8 +839,8 @@ async function viewDiff() {
   selA.onchange = selB.onchange = populatePaths;
   pathSel.onchange = renderVisual;
   populatePaths();
-  ctxHint("Comparar versiones", "Verde añadido, ámbar modificado, rojo eliminado " +
-    "o estado previo. Solo planos DXF tienen vista geométrica.");
+  ctxHint("Comparar versiones", "Verde añadido, ambar modificado, rojo eliminado " +
+    "o estado previo. Solo planos DXF tienen vista geometrica.");
 }
 
 // ——— Vista: Fusionar + resolutor de conflictos (SIGNATURE) ———
@@ -495,17 +854,17 @@ async function viewMerge() {
   }
   const sel = el("select");
   for (const b of branches) sel.append(el("option", { value: b.name, textContent: b.name }));
-  const runRow = el("div", { className: "row", style: "margin-bottom:14px" },
+  const runRow = el("div", { className: "row", style: "margin-bottom:16px" },
     labelled("Traer rama", sel));
   const btn = el("button", { className: "btn" }, "Fusionar en " + S.branch);
   runRow.append(el("div", { style: "align-self:flex-end" }, btn));
   const out = el("div");
   v.append(el("p", { className: "muted" },
-    "La fusión combina cambios en entidades distintas automáticamente. " +
+    "La fusion combina cambios en entidades distintas automaticamente. " +
     "Si dos ramas tocan la misma entidad, la resuelves abajo."), runRow, out);
 
   btn.onclick = () => attemptMerge(sel.value, out, {});
-  ctxHint("Fusión por entidad", "Los conflictos se resuelven plano a plano, " +
+  ctxHint("Fusion por entidad", "Los conflictos se resuelven plano a plano, " +
     "eligiendo el lado a conservar por cada entidad en discordia.");
 }
 
@@ -516,12 +875,12 @@ async function attemptMerge(branch, out, resolutions) {
     const body = { branch };
     if (endpoint === "/merge/resolve") body.resolutions = resolutions;
     const r = await api("/repos/" + S.repo + endpoint, { method: "POST", json: body });
-    const label = { merged: "Fusión completada", "fast-forward": "Avance rápido",
+    const label = { merged: "Fusion completada", "fast-forward": "Avance rapido",
       "already-up-to-date": "Ya actualizado" }[r.result] || r.result;
     toast(label + (r.commit_id ? " · c" + r.commit_id : ""));
     out.append(el("div", { className: "viewport", style: "min-height:auto;justify-content:flex-start" },
       el("span", { className: "mono" }, "✓ " + label)));
-    loadBranches(); 
+    loadBranches();
   } catch (e) {
     if (e.status === 409 && e.data && e.data.conflicts) {
       renderConflicts(branch, out, e.data.conflicts);
@@ -529,17 +888,16 @@ async function attemptMerge(branch, out, resolutions) {
   }
 }
 
-// El resolutor: nubes de revisión por entidad, elección ours/theirs.
 function renderConflicts(branch, out, conflicts, prev={}) {
   out.innerHTML = "";
   const picks = Object.assign({}, prev);
-  const banner = el("div", { className: "row", style: "margin:6px 0 14px" });
+  const banner = el("div", { className: "row", style: "margin:8px 0 16px" });
   const count = el("span", { className: "mono muted" });
   const resolveBtn = el("button", { className: "btn danger" }, "Resolver y fusionar");
   banner.append(count, resolveBtn);
-  out.append(el("h2", {}, "Conflictos de fusión"), banner);
+  out.append(el("h2", {}, "Conflictos de fusion"), banner);
 
-  const flat = [];  // (path, conflict)
+  const flat = [];
   for (const [path, list] of Object.entries(conflicts)) {
     if (list === "binary") {
       out.append(el("div", { className: "conflict" },
@@ -603,7 +961,7 @@ function sideCard(role, payload) {
   return card;
 }
 
-// ——— Vista: Autoría (blame) ———
+// ——— Vista: Autoria (blame) ———
 async function viewBlame() {
   const v = $("#view"); v.innerHTML = "";
   const refs = await refList();
@@ -611,7 +969,7 @@ async function viewBlame() {
   for (const p of await dxfPaths()) pathSel.append(el("option", { value: p, textContent: p }));
   if (!pathSel.options.length) {
     v.append(el("div", { className: "empty" }, el("b", {}, "Sin planos DXF"),
-      "La autoría por entidad requiere un plano DXF en esta rama."));
+      "La autoria por entidad requiere un plano DXF en esta rama."));
     return;
   }
   v.append(el("div", { className: "row" }, labelled("Plano", pathSel)));
@@ -631,15 +989,15 @@ async function viewBlame() {
     } catch (e) { tbl.append(el("caption", { className: "muted" }, e.message)); }
   }
   pathSel.onchange = load; load();
-  ctxHint("Autoría por entidad", "Cada entidad se atribuye al commit que la " +
-    "dejó en su estado actual, incluso a través de fusiones.");
+  ctxHint("Autoria por entidad", "Cada entidad se atribuye al commit que la " +
+    "dejo en su estado actual, incluso a traves de fusiones.");
 }
 
 // ——— Vista: Bloqueos ———
 async function viewLocks() {
   const v = $("#view"); v.innerHTML = "";
   const tbl = el("table");
-  const add = el("div", { className: "row", style: "margin-top:14px" });
+  const add = el("div", { className: "row", style: "margin-top:16px" });
   const pathInput = el("input", { className: "txt mono", placeholder: "ruta/al/plano.dwg" });
   const lockBtn = el("button", { className: "btn sm" }, "Bloquear");
   add.append(el("div", { style: "flex:1" }, pathInput), lockBtn);
@@ -651,7 +1009,7 @@ async function viewLocks() {
       tbl.append(el("thead", {}, rowEl("th", ["Plano", "Propietario", "Expira", ""])));
       const body = el("tbody");
       if (!locks.length) body.append(el("tr", {},
-        el("td", { colSpan: 4, className: "muted" }, "ningún bloqueo activo")));
+        el("td", { colSpan: 4, className: "muted" }, "ningun bloqueo activo")));
       for (const l of locks) {
         const tr = el("tr", {},
           el("td", {}, l.path), el("td", {}, l.owner), el("td", {}, l.expires_at));
@@ -677,7 +1035,7 @@ async function viewLocks() {
   };
   load();
   ctxHint("Bloqueos", "Los planos binarios (DWG) no se fusionan: el bloqueo " +
-    "evita ediciones en paralelo que se pisarían.");
+    "evita ediciones en paralelo que se pisarian.");
 }
 
 // ——— Helpers ———
