@@ -779,17 +779,17 @@ async function showCommit(c) {
   if (c.parent_id == null) return;
   try {
     const d = await api("/repos/" + S.repo + "/diff?ref_a=" + c.parent_id + "&ref_b=" + c.id);
-    const container = el("div", { style: "margin-top:16px" });
+    const container = el("div", { style: "margin-top:14px" });
     container.append(el("div", { className: "eyebrow" }, "Cambios"));
-    for (const p of d.added) container.append(el("div", { className: "mono", style: "color:var(--color-success-fg);font-size:12px;padding:2px 0" }, "+ " + p));
-    for (const p of d.removed) container.append(el("div", { className: "mono", style: "color:var(--color-danger-fg);font-size:12px;padding:2px 0" }, "− " + p));
+    for (const p of d.added) container.append(el("div", { className: "mono", style: "color:var(--added);font-size:12px" }, "+ " + p));
+    for (const p of d.removed) container.append(el("div", { className: "mono", style: "color:var(--revision);font-size:12px" }, "− " + p));
     for (const [p, detail] of Object.entries(d.modified)) {
-      container.append(el("div", { className: "mono", style: "color:var(--color-attention-fg);font-size:12px;padding:2px 0" }, "~ " + p));
+      container.append(el("div", { className: "mono", style: "color:var(--modified);font-size:12px" }, "~ " + p));
       if (detail && detail !== "binary") {
         const sub = el("div", { style: "padding-left:16px;font-size:11px" });
-        if (detail.added && detail.added.length) sub.append(el("span", { className: "mono", style: "color:var(--color-success-fg)" }, "+" + detail.added.length + " entidades  "));
-        if (detail.removed && detail.removed.length) sub.append(el("span", { className: "mono", style: "color:var(--color-danger-fg)" }, "−" + detail.removed.length + " entidades  "));
-        if (detail.modified && detail.modified.length) sub.append(el("span", { className: "mono", style: "color:var(--color-attention-fg)" }, "~" + detail.modified.length + " entidades"));
+        if (detail.added && detail.added.length) sub.append(el("span", { className: "mono", style: "color:var(--added)" }, "+" + detail.added.length + " entidades  "));
+        if (detail.removed && detail.removed.length) sub.append(el("span", { className: "mono", style: "color:var(--revision)" }, "−" + detail.removed.length + " entidades  "));
+        if (detail.modified && detail.modified.length) sub.append(el("span", { className: "mono", style: "color:var(--modified)" }, "~" + detail.modified.length + " entidades"));
         if (sub.childNodes.length) container.append(sub);
       }
     }
