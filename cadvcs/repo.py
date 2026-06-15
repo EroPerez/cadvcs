@@ -19,11 +19,12 @@ from __future__ import annotations
 
 import json
 import tempfile
+import ezdxf
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from . import db, semdiff, merge as merge_mod
-from .storage import BlobStore
+from . import db, identity, semdiff, merge as merge_mod
+from .storage import BlobStore, open_store
 
 REPO_DIR = ".cadvcs"
 DEFAULT_BRANCH = "main"
@@ -54,7 +55,7 @@ class Repo:
         self.vcs_dir = self.root / REPO_DIR
         if not self.vcs_dir.exists():
             raise CadVcsError(f"No hay repo en {self.root} (ejecuta init)")
-        self.store = BlobStore(self.vcs_dir / "objects")
+        self.store = open_store(self.vcs_dir / "objects")
         self.conn = db.connect(self.vcs_dir / "metadata.db")
 
     @classmethod
@@ -165,20 +166,45 @@ class Repo:
                 self.conn.execute(
                     "INSERT OR IGNORE INTO tracked (repo_path) VALUES (?)", (rp,))
 
+    def stage_blob(self, repo_path: str, blob_sha: str, size: int):
+        """Registra un blob ya en el store (subido por presigned) como el
+        contenido de repo_path, sin tocar la working copy local."""
+        self.store.register(blob_sha, size)   # falla si el cliente no subió
+        with self.conn:
+            self.conn.execute(
+                "INSERT OR IGNORE INTO tracked (repo_path) VALUES (?)",
+                (repo_path,))
+            self.conn.execute("DELETE FROM staged WHERE repo_path = ?",
+                              (repo_path,))
+            self.conn.execute(
+                "INSERT INTO staged (repo_path, blob_sha, size_bytes) "
+                "VALUES (?, ?, ?)", (repo_path, blob_sha, size))
+
     def _tracked(self) -> list[str]:
         return [r["repo_path"] for r in
                 self.conn.execute("SELECT repo_path FROM tracked").fetchall()]
 
+    def _staged(self) -> dict[str, dict]:
+        rows = self.conn.execute(
+            "SELECT repo_path, blob_sha, size_bytes FROM staged").fetchall()
+        return {r["repo_path"]: dict(r) for r in rows}
+
     def status(self) -> dict[str, list[str]]:
         head = self._tree(self.head_commit_id())
+        staged = self._staged()
         st = {"new": [], "modified": [], "deleted": [], "clean": []}
-        for rp in sorted(self._tracked()):
-            fs_path = self.root / rp
-            if not fs_path.exists():
-                if rp in head:
-                    st["deleted"].append(rp)
-                continue
-            sha = BlobStore.hash_file(fs_path)
+        for rp in sorted(set(self._tracked()) | set(staged)):
+            # Una entrada staged (presigned) define el contenido por SHA
+            # sin necesidad de fichero local en la working copy.
+            if rp in staged:
+                sha = staged[rp]["blob_sha"]
+            else:
+                fs_path = self.root / rp
+                if not fs_path.exists():
+                    if rp in head:
+                        st["deleted"].append(rp)
+                    continue
+                sha = BlobStore.hash_file(fs_path)
             if rp not in head:
                 st["new"].append(rp)
             elif head[rp]["blob_sha"] != sha:
@@ -201,25 +227,67 @@ class Repo:
         self._check_locks(changed, author)
 
         parent_id = self.head_commit_id()
+        changed_set = set(changed)
+        staged = self._staged()
         entries = {}
+        to_index: list[str] = []
         for rp in self._tracked():
+            if rp in staged:
+                # Blob subido por presigned: ya está en el store. No se lee
+                # disco ni se inyectan GUIDs (la identidad cae a handle vía
+                # entity_uid; el cliente puede inyectar GUIDs antes de subir).
+                sha, size = staged[rp]["blob_sha"], staged[rp]["size_bytes"]
+                entries[rp] = (sha, size)
+                if rp.lower().endswith(".dxf"):
+                    to_index.append((sha, "index"))
+                elif rp.lower().endswith(".dwg"):
+                    to_index.append((sha, "convert"))
+                continue
             fs_path = self.root / rp
             if not fs_path.exists():
                 continue  # borrado: simplemente no entra en el snapshot
+            # Identidad estable: inyectar GUIDs a entidades nuevas de los
+            # DXF que cambiaron (los no cambiados ya los recibieron en su
+            # primer commit; tocarlos los marcaría como modificados)
+            if rp in changed_set and fs_path.suffix.lower() == ".dxf":
+                doc = ezdxf.readfile(fs_path)
+                if identity.ensure_guids(doc):
+                    doc.saveas(fs_path)
             sha, size = self.store.put(fs_path)
             entries[rp] = (sha, size)
             if fs_path.suffix.lower() == ".dxf":
-                self._index_blob(sha, fs_path)
+                to_index.append((sha, "index"))
+            elif fs_path.suffix.lower() == ".dwg":
+                to_index.append((sha, "convert"))
 
         with self.conn:
-            cur = self.conn.execute(
+            cid = self.conn.insert_id(
                 "INSERT INTO commits (parent_id, parent2_id, author, message) "
                 "VALUES (?, ?, ?, ?)", (parent_id, parent2_id, author, message))
-            cid = cur.lastrowid
             self.conn.executemany(
                 "INSERT INTO commit_entries (commit_id, repo_path, blob_sha, "
                 "size_bytes) VALUES (?, ?, ?, ?)",
                 [(cid, rp, sha, size) for rp, (sha, size) in entries.items()])
+            # Transactional outbox: el evento de indexado entra en la MISMA
+            # transacción que el commit. Si un blob ya está indexado (dedup),
+            # no se encola. El worker lo drena; mientras tanto, la primera
+            # lectura vía _entities_for_blob indexa bajo demanda como red de
+            # seguridad, así diff/merge/blame nunca esperan al worker.
+            for sha, kind in dict.fromkeys(to_index):  # únicos, orden estable
+                if kind == "index":
+                    already = self.conn.execute(
+                        "SELECT 1 FROM entities WHERE blob_sha = ? LIMIT 1",
+                        (sha,)).fetchone()
+                else:  # convert: dedup contra el espejo existente
+                    already = self.conn.execute(
+                        "SELECT 1 FROM dwg_mirrors WHERE dwg_sha = ? LIMIT 1",
+                        (sha,)).fetchone()
+                if not already:
+                    self.conn.execute(
+                        "INSERT INTO index_outbox (blob_sha, repo_key, kind) "
+                        "VALUES (?, ?, ?)", (sha, self.root.name, kind))
+            # Limpiar staging de lo commiteado
+            self.conn.execute("DELETE FROM staged")
             # Los archivos borrados dejan de estar tracked
             for rp in st["deleted"]:
                 self.conn.execute("DELETE FROM tracked WHERE repo_path = ?", (rp,))
@@ -243,6 +311,97 @@ class Repo:
                 [(blob_sha, h, e["dxftype"], e["layer"], e["fingerprint"],
                   json.dumps(e["attrs"], default=str)) for h, e in ents.items()])
 
+    def index_pending(self, limit: int = 100) -> list[dict]:
+        """Eventos pendientes (para el worker), con su kind."""
+        rows = self.conn.execute(
+            "SELECT id, blob_sha, kind, attempts FROM index_outbox "
+            "WHERE status = 'pending' ORDER BY id LIMIT ?", (limit,)).fetchall()
+        return [dict(r) for r in rows]
+
+    def dwg_mirror(self, dwg_sha: str) -> str | None:
+        """SHA del DXF espejo de un DWG, o None si aún no se ha convertido."""
+        row = self.conn.execute(
+            "SELECT dxf_sha FROM dwg_mirrors WHERE dwg_sha = ?",
+            (dwg_sha,)).fetchone()
+        return row["dxf_sha"] if row else None
+
+    def _convert_dwg(self, dwg_sha: str) -> str:
+        """Convierte un DWG (por SHA) a DXF, guarda el espejo en el store y
+        registra la relación. Devuelve el dxf_sha. Indexa el DXF espejo."""
+        from . import convert
+        converter = convert.get_converter()
+        if not converter.available():
+            raise convert.ConversionUnavailable(
+                f"conversor '{converter.name}' no disponible")
+        with tempfile.NamedTemporaryFile(suffix=".dwg", delete=False) as t1:
+            dwg_path = Path(t1.name)
+        dxf_path = dwg_path.with_suffix(".dxf")
+        try:
+            self.store.get(dwg_sha, dwg_path)
+            converter.to_dxf(dwg_path, dxf_path)
+            # Inyectar GUIDs al espejo para identidad estable de entidades
+            doc = ezdxf.readfile(dxf_path)
+            if identity.ensure_guids(doc):
+                doc.saveas(dxf_path)
+            dxf_sha, _ = self.store.put(dxf_path)
+            self._index_blob(dxf_sha, dxf_path)
+            with self.conn:
+                self.conn.execute(
+                    "INSERT OR IGNORE INTO dwg_mirrors "
+                    "(dwg_sha, dxf_sha, converter) VALUES (?, ?, ?)",
+                    (dwg_sha, dxf_sha, converter.name))
+            return dxf_sha
+        finally:
+            dwg_path.unlink(missing_ok=True)
+            dxf_path.unlink(missing_ok=True)
+
+    def index_one(self, event_id: int, blob_sha: str, kind: str = "index") -> bool:
+        """Procesa un evento del outbox según su kind.
+
+        'index'  → extrae entidades del DXF (idempotente).
+        'convert'→ DWG→DXF espejo + index del espejo (idempotente: si ya
+                   hay espejo, solo cierra el evento).
+        Ante error incrementa attempts y deja el evento pendiente.
+        """
+        try:
+            if kind == "convert":
+                if not self.dwg_mirror(blob_sha):
+                    self._convert_dwg(blob_sha)
+            else:
+                already = self.conn.execute(
+                    "SELECT 1 FROM entities WHERE blob_sha = ? LIMIT 1",
+                    (blob_sha,)).fetchone()
+                if not already:
+                    with tempfile.NamedTemporaryFile(suffix=".dxf",
+                                                     delete=False) as tmp:
+                        tmp_path = Path(tmp.name)
+                    try:
+                        self.store.get(blob_sha, tmp_path)
+                        self._index_blob(blob_sha, tmp_path)
+                    finally:
+                        tmp_path.unlink(missing_ok=True)
+            with self.conn:
+                self.conn.execute(
+                    "UPDATE index_outbox SET status = 'done' WHERE id = ?",
+                    (event_id,))
+            return True
+        except Exception:
+            with self.conn:
+                self.conn.execute(
+                    "UPDATE index_outbox SET attempts = attempts + 1 "
+                    "WHERE id = ?", (event_id,))
+            return False
+
+    def index_drain(self, limit: int = 100) -> dict:
+        """Drena el outbox de ESTE repo (útil en tests y modo síncrono)."""
+        done = failed = 0
+        for ev in self.index_pending(limit):
+            if self.index_one(ev["id"], ev["blob_sha"], ev.get("kind", "index")):
+                done += 1
+            else:
+                failed += 1
+        return {"done": done, "failed": failed}
+
     def _entities_for_blob(self, blob_sha: str) -> dict[str, dict]:
         rows = self.conn.execute(
             "SELECT handle, dxftype, layer, fingerprint, attrs_json "
@@ -254,6 +413,11 @@ class Repo:
             self.store.get(blob_sha, tmp_path)
             self._index_blob(blob_sha, tmp_path)
             tmp_path.unlink()
+            # Indexado bajo demanda: cerrar su evento outbox si lo hubiera
+            with self.conn:
+                self.conn.execute(
+                    "UPDATE index_outbox SET status = 'done' "
+                    "WHERE blob_sha = ? AND status = 'pending'", (blob_sha,))
             return self._entities_for_blob(blob_sha)
         return {r["handle"]: {"dxftype": r["dxftype"], "layer": r["layer"],
                               "fingerprint": r["fingerprint"],
@@ -261,6 +425,86 @@ class Repo:
                 for r in rows}
 
     # ================================================== branch / tag / switch
+    def branch_delete(self, name: str, force: bool = False):
+        if name == self.current_branch:
+            raise CadVcsError("No se puede borrar la rama actual")
+        row = self.conn.execute(
+            "SELECT head_commit_id FROM branches WHERE name = ?", (name,)
+        ).fetchone()
+        if not row:
+            raise CadVcsError(f"La rama {name} no existe")
+        # Protección estilo git branch -d: no borrar trabajo no mergeado
+        if not force and row["head_commit_id"] is not None:
+            head = self.head_commit_id()
+            if head is None or row["head_commit_id"] not in self._ancestors(head):
+                raise CadVcsError(
+                    f"{name} tiene commits no alcanzables desde "
+                    f"{self.current_branch} (usa force)")
+        with self.conn:
+            self.conn.execute("DELETE FROM branches WHERE name = ?", (name,))
+
+    def tag_delete(self, name: str):
+        with self.conn:
+            cur = self.conn.execute("DELETE FROM tags WHERE name = ?", (name,))
+        if cur.rowcount == 0:
+            raise CadVcsError(f"El tag {name} no existe")
+
+    def gc(self) -> dict:
+        """Mark-and-sweep: elimina commits inalcanzables desde cualquier
+        ref y los blobs/índices que solo ellos referenciaban."""
+        # MARK: alcanzable desde todas las ramas y tags
+        roots = [r["head_commit_id"] for r in self.conn.execute(
+            "SELECT head_commit_id FROM branches "
+            "WHERE head_commit_id IS NOT NULL").fetchall()]
+        roots += [r["commit_id"] for r in self.conn.execute(
+            "SELECT commit_id FROM tags").fetchall()]
+        reachable: set[int] = set()
+        for root in roots:
+            reachable |= self._ancestors(root)
+
+        all_commits = {r["id"] for r in self.conn.execute(
+            "SELECT id FROM commits").fetchall()}
+        dead_commits = all_commits - reachable
+
+        # SWEEP de metadata
+        with self.conn:
+            if dead_commits:
+                marks = ",".join("?" * len(dead_commits))
+                ids = list(dead_commits)
+                self.conn.execute(
+                    f"DELETE FROM commit_entries WHERE commit_id IN ({marks})",
+                    ids)
+                self.conn.execute(
+                    f"DELETE FROM commits WHERE id IN ({marks})", ids)
+        live_blobs = {r["blob_sha"] for r in self.conn.execute(
+            "SELECT DISTINCT blob_sha FROM commit_entries").fetchall()}
+        # Los archivos del workdir actual también están vivos
+        for rp in self._tracked():
+            fs = self.root / rp
+            if fs.exists():
+                live_blobs.add(BlobStore.hash_file(fs))
+
+        # SWEEP de blobs e índice semántico
+        dead_blobs = 0
+        freed = 0
+        for shard in self.store.root.iterdir():
+            if not shard.is_dir():
+                continue
+            for obj in shard.iterdir():
+                sha = shard.name + obj.name
+                if sha not in live_blobs:
+                    freed += obj.stat().st_size
+                    obj.unlink()
+                    dead_blobs += 1
+        if dead_blobs:
+            with self.conn:
+                placeholders = ",".join("?" * len(live_blobs)) or "''"
+                self.conn.execute(
+                    f"DELETE FROM entities WHERE blob_sha NOT IN "
+                    f"({placeholders})", list(live_blobs))
+        return {"commits_removed": len(dead_commits),
+                "blobs_removed": dead_blobs, "bytes_freed": freed}
+
     def branch_create(self, name: str):
         if self.conn.execute("SELECT 1 FROM branches WHERE name = ?",
                              (name,)).fetchone():
@@ -346,12 +590,45 @@ class Repo:
             queue += [p for p in (row["parent_id"], row["parent2_id"]) if p]
         return None
 
-    def log(self, ref: str = "HEAD", limit: int = 50) -> list[dict]:
+    def log(self, ref: str = "HEAD", limit: int = 50,
+            author: str | None = None, path: str | None = None,
+            since: str | None = None, before_id: int | None = None) -> list[dict]:
+        """Historia first-parent con filtros y paginación por cursor.
+
+        author/since filtran por autor y fecha mínima (ISO); path conserva
+        solo commits que TOCARON ese archivo (su blob difiere del padre);
+        before_id es el cursor: continúa por debajo de ese commit.
+        """
         out, cid = [], self.resolve(ref)
+        skipping = before_id is not None
         while cid and len(out) < limit:
             row = self.conn.execute(
                 "SELECT id, parent_id, parent2_id, author, message, created_at "
                 "FROM commits WHERE id = ?", (cid,)).fetchone()
+            if skipping:
+                if row["id"] == before_id:
+                    skipping = False
+                cid = row["parent_id"]
+                continue
+            if author and row["author"] != author:
+                cid = row["parent_id"]
+                continue
+            if since and row["created_at"] < since:
+                break  # first-parent es descendente en el tiempo
+            if path:
+                sha = self.conn.execute(
+                    "SELECT blob_sha FROM commit_entries "
+                    "WHERE commit_id = ? AND repo_path = ?",
+                    (row["id"], path)).fetchone()
+                parent_sha = self.conn.execute(
+                    "SELECT blob_sha FROM commit_entries "
+                    "WHERE commit_id = ? AND repo_path = ?",
+                    (row["parent_id"], path)).fetchone() if row["parent_id"] else None
+                touched = (sha is None) != (parent_sha is None) or (
+                    sha and parent_sha and sha["blob_sha"] != parent_sha["blob_sha"])
+                if not touched:
+                    cid = row["parent_id"]
+                    continue
             d = dict(row)
             d["is_merge"] = row["parent2_id"] is not None
             d["branches"] = [b["name"] for b in self.conn.execute(
@@ -569,48 +846,68 @@ class Repo:
 
     # ================================================== blame
     def blame(self, repo_path: str, ref: str = "HEAD") -> list[dict]:
-        """Para cada entidad de la versión actual: último commit que la tocó.
+        """Para cada entidad de la versión en ref: el commit que la dejó
+        en su estado actual.
 
-        Recorre la cadena first-parent desde ref hacia atrás; una entidad se
-        atribuye al commit donde su fingerprint difiere del padre (o aparece).
+        Desciende por el DAG completo (no solo first-parent): desde ref,
+        para cada uid se sigue al padre cuya versión tiene el MISMO
+        fingerprint; cuando ningún padre coincide (cambió respecto a
+        todos, o no existe en ninguno), ese commit es el responsable.
+        Gracias a los GUIDs, una entidad creada en una rama y fusionada
+        conserva su identidad y se atribuye a su commit de origen, no al
+        merge commit.
         """
         if not repo_path.lower().endswith(".dxf"):
             raise CadVcsError("blame solo soporta DXF")
-        chain = self.log(ref, limit=10_000)
-        current_sha = None
-        for c in chain:
-            tree = self._tree(c["id"])
-            if repo_path in tree:
-                current_sha = tree[repo_path]["blob_sha"]
-                break
-        if current_sha is None:
+        head_id = self.resolve(ref)
+
+        def file_entities(commit_id: int | None) -> dict[str, dict]:
+            if commit_id is None:
+                return {}
+            sha = self._tree(commit_id).get(repo_path, {}).get("blob_sha")
+            return self._entities_for_blob(sha) if sha else {}
+
+        def parents(commit_id: int) -> list[int]:
+            row = self.conn.execute(
+                "SELECT parent_id, parent2_id FROM commits WHERE id = ?",
+                (commit_id,)).fetchone()
+            return [p for p in (row["parent_id"], row["parent2_id"]) if p]
+
+        def commit_info(commit_id: int) -> dict:
+            row = self.conn.execute(
+                "SELECT id, author, message FROM commits WHERE id = ?",
+                (commit_id,)).fetchone()
+            return {"commit_id": row["id"], "author": row["author"],
+                    "message": row["message"]}
+
+        current = file_entities(head_id)
+        if not current:
             raise CadVcsError(f"{repo_path} no existe en {ref}")
 
-        current = self._entities_for_blob(current_sha)
+        ents_cache: dict[int, dict] = {head_id: current}
+
+        def ents(cid: int) -> dict:
+            if cid not in ents_cache:
+                ents_cache[cid] = file_entities(cid)
+            return ents_cache[cid]
+
         attribution: dict[str, dict] = {}
-        pending = set(current)
+        for uid, record in current.items():
+            cid, fp = head_id, record["fingerprint"]
+            seen = set()
+            while True:
+                seen.add(cid)
+                nxt = None
+                for p in parents(cid):
+                    pe = ents(p).get(uid)
+                    if pe and pe["fingerprint"] == fp and p not in seen:
+                        nxt = p
+                        break
+                if nxt is None:
+                    attribution[uid] = commit_info(cid)
+                    break
+                cid = nxt
 
-        for i, c in enumerate(chain):
-            if not pending:
-                break
-            tree = self._tree(c["id"])
-            parent_tree = self._tree(chain[i + 1]["id"]) if i + 1 < len(chain) else {}
-            sha = tree.get(repo_path, {}).get("blob_sha")
-            psha = parent_tree.get(repo_path, {}).get("blob_sha")
-            if sha is None:
-                continue
-            ents = self._entities_for_blob(sha)
-            pents = self._entities_for_blob(psha) if psha else {}
-            for h in list(pending):
-                if h not in ents:
-                    continue
-                changed_here = (h not in pents or
-                                pents[h]["fingerprint"] != ents[h]["fingerprint"])
-                if changed_here:
-                    attribution[h] = {"commit_id": c["id"], "author": c["author"],
-                                      "message": c["message"]}
-                    pending.discard(h)
-
-        return [{"handle": h, "dxftype": current[h]["dxftype"],
-                 "layer": current[h]["layer"], **attribution.get(h, {})}
-                for h in sorted(current)]
+        return [{"handle": uid, "dxftype": current[uid]["dxftype"],
+                 "layer": current[uid]["layer"], **attribution[uid]}
+                for uid in sorted(current)]

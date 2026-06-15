@@ -21,7 +21,9 @@ from collections import defaultdict
 from pathlib import Path
 
 from fastapi import Body, FastAPI, HTTPException, Query, Request
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import (FileResponse, JSONResponse, RedirectResponse,
+                               StreamingResponse, Response)
+from fastapi.staticfiles import StaticFiles
 
 from fastapi import Depends
 
@@ -29,7 +31,8 @@ from .. import semdiff
 from ..repo import Repo, CadVcsError, LockError, MergeConflictError, REPO_DIR
 from ..storage import BlobStore
 from . import schemas as S
-from .auth import Principal, get_principal
+from .auth import (Principal, get_principal, require_admin,
+                   require_editor, require_viewer)
 
 DATA_DIR = Path(os.environ.get("CADVCS_DATA", "./cadvcs-data")).resolve()
 DATA_DIR.mkdir(parents=True, exist_ok=True)
@@ -41,7 +44,7 @@ app = FastAPI(
     version="0.4.0",
     description="Control de versiones tipo Git para archivos CAD "
                 "con merge a nivel de entidad DXF y auth OIDC",
-    dependencies=[Depends(get_principal)],   # toda la API requiere JWT válido
+    dependencies=[Depends(require_viewer)],  # JWT válido + rol viewer mínimo
 )
 
 
@@ -79,8 +82,47 @@ def _cadvcs_error(request: Request, exc: CadVcsError):
     return JSONResponse(status_code=status, content={"detail": str(exc)})
 
 
+@app.get("/health")
+def health():
+    """Liveness/readiness: verifica metadata DB y storage escribible."""
+    import uuid as _uuid
+    checks = {"database": "ok", "storage": "ok"}
+    status = 200
+    try:
+        from .. import db as _db
+        probe = DATA_DIR / ".healthcheck"
+        conn = _db.connect(probe / "metadata.db", repo_key="healthcheck") \
+            if _db.DB_URL else None
+        if conn:
+            conn.execute("SELECT 1").fetchone()
+    except Exception as exc:
+        checks["database"] = f"error: {exc}"
+        status = 503
+    try:
+        token = DATA_DIR / f".health-{_uuid.uuid4().hex}"
+        token.write_text("ok")
+        token.unlink()
+    except Exception as exc:
+        checks["storage"] = f"error: {exc}"
+        status = 503
+    from ..cache import render_cache
+    from .. import bus as _bus, convert as _convert
+    checks["render_cache"] = "redis" if render_cache().enabled else "off"
+    checks["event_bus"] = "kafka" if _bus.get_bus() else "polling"
+    checks["dwg_converter"] = _convert.get_converter().name
+    return JSONResponse(status_code=status,
+                        content={"status": "ok" if status == 200 else "degraded",
+                                 "backend": "postgresql" if os.environ.get(
+                                     "CADVCS_DB_URL") else "sqlite",
+                                 "render_cache": checks["render_cache"],
+                                 "event_bus": checks["event_bus"],
+                                 "dwg_converter": checks["dwg_converter"],
+                                 "checks": checks})
+
+
 # ----------------------------------------------------------- repos
-@app.post("/repos", response_model=S.RepoInfo, status_code=201)
+@app.post("/repos", response_model=S.RepoInfo, status_code=201,
+          dependencies=[Depends(require_editor)])
 def create_repo(body: S.RepoCreate):
     root = _repo_root(body.name)
     if (root / REPO_DIR).exists():
@@ -104,7 +146,8 @@ def get_repo(name: str):
 
 
 # ----------------------------------------------------------- archivos
-@app.put("/repos/{name}/files/{file_path:path}", response_model=S.UploadResponse)
+@app.put("/repos/{name}/files/{file_path:path}", response_model=S.UploadResponse,
+         dependencies=[Depends(require_editor)])
 def upload_file(name: str, file_path: str, body: bytes = Body(media_type="application/octet-stream")):
     """Sube contenido a la working copy y lo marca como tracked."""
     with _repo_locks[name]:
@@ -118,16 +161,62 @@ def upload_file(name: str, file_path: str, body: bytes = Body(media_type="applic
 
 
 @app.get("/repos/{name}/files/{file_path:path}")
-def download_file(name: str, file_path: str, ref: str = Query("HEAD")):
+def download_file(name: str, file_path: str, ref: str = Query("HEAD"),
+                  presigned: bool = Query(False)):
     """Descarga el archivo tal como existe en una ref (commit, rama o tag)."""
     repo = _open_repo(name)
     tree = repo._tree(repo.resolve(ref))
     if file_path not in tree:
         raise HTTPException(404, f"{file_path} no existe en {ref}")
-    blob_path = repo.store._path_for(tree[file_path]["blob_sha"])
-    return FileResponse(blob_path, filename=Path(file_path).name,
-                        media_type="application/octet-stream",
-                        headers={"X-Blob-Sha256": tree[file_path]["blob_sha"]})
+    sha = tree[file_path]["blob_sha"]
+    fname = Path(file_path).name
+    if presigned:
+        from ..storage import S3BlobStore
+        if not isinstance(repo.store, S3BlobStore):
+            raise HTTPException(409, "presigned requiere backend S3")
+        # 307: la descarga sale del path de bytes de la API, directa de S3
+        return RedirectResponse(repo.store.presigned_get(sha, filename=fname),
+                                status_code=307)
+    body = repo.store.open(sha)   # file-like: local o streaming desde S3
+    return StreamingResponse(
+        body, media_type="application/octet-stream",
+        headers={"X-Blob-Sha256": sha,
+                 "Content-Disposition": f'attachment; filename="{fname}"'})
+
+
+@app.post("/repos/{name}/blobs/{sha}/upload-url",
+          dependencies=[Depends(require_editor)])
+def upload_url(name: str, sha: str, expires: int = Query(900, le=3600)):
+    """Handshake de subida estilo Git-LFS, dedup-aware.
+
+    Si el blob ya está en el store → {exists:true} sin URL (cero
+    transferencia). Si no → {exists:false, upload_url} para que el
+    cliente haga PUT directo a object storage. Requiere backend S3."""
+    from ..storage import S3BlobStore
+    repo = _open_repo(name)
+    if not isinstance(repo.store, S3BlobStore):
+        raise HTTPException(409, "upload-url requiere backend S3 "
+                                 "(CADVCS_BLOB_URL); usa PUT /files en local")
+    if repo.store.exists(sha):
+        return {"exists": True}
+    return {"exists": False, "upload_url": repo.store.presigned_put(sha, expires),
+            "method": "PUT"}
+
+
+@app.put("/repos/{name}/staged/{file_path:path}",
+         response_model=S.UploadResponse,
+         dependencies=[Depends(require_editor)])
+def stage_file(name: str, file_path: str, body: S.StageRequest):
+    """Registra por referencia un blob ya subido por presigned PUT.
+
+    No transfiere bytes: el commit posterior lo incluirá tomando el SHA
+    del staging. Falla 422 si el cliente no completó la subida a S3."""
+    with _repo_locks[name]:
+        repo = _open_repo(name)
+        _safe_file_path(repo, file_path)   # valida la ruta
+        repo.stage_blob(file_path, body.sha256, body.size)
+        return S.UploadResponse(path=file_path, sha256=body.sha256,
+                                size=body.size, tracked=True)
 
 
 # ----------------------------------------------------------- estado / commits
@@ -137,7 +226,8 @@ def status(name: str):
     return S.StatusResponse(branch=repo.current_branch, **repo.status())
 
 
-@app.post("/repos/{name}/commits", response_model=S.CommitInfo, status_code=201)
+@app.post("/repos/{name}/commits", response_model=S.CommitInfo, status_code=201,
+          dependencies=[Depends(require_editor)])
 def commit(name: str, body: S.CommitRequest,
            who: Principal = Depends(get_principal)):
     with _repo_locks[name]:
@@ -146,8 +236,14 @@ def commit(name: str, body: S.CommitRequest,
 
 
 @app.get("/repos/{name}/commits", response_model=list[S.CommitLogEntry])
-def log(name: str, ref: str = Query("HEAD"), limit: int = Query(50, le=500)):
-    return _open_repo(name).log(ref, limit)
+def log(name: str, ref: str = Query("HEAD"), limit: int = Query(50, le=500),
+        author: str | None = Query(None), path: str | None = Query(None),
+        since: str | None = Query(None,
+                                  description="fecha mínima ISO, ej. 2026-06-01"),
+        before_id: int | None = Query(None,
+                                      description="cursor de paginación")):
+    return _open_repo(name).log(ref, limit, author=author, path=path,
+                                since=since, before_id=before_id)
 
 
 # ----------------------------------------------------------- branches / tags
@@ -156,7 +252,8 @@ def branches(name: str):
     return _open_repo(name).branches()
 
 
-@app.post("/repos/{name}/branches", response_model=S.BranchInfo, status_code=201)
+@app.post("/repos/{name}/branches", response_model=S.BranchInfo, status_code=201,
+          dependencies=[Depends(require_editor)])
 def create_branch(name: str, body: S.BranchCreate):
     with _repo_locks[name]:
         repo = _open_repo(name)
@@ -165,7 +262,8 @@ def create_branch(name: str, body: S.BranchCreate):
                             current=False)
 
 
-@app.post("/repos/{name}/switch", response_model=S.RepoInfo)
+@app.post("/repos/{name}/switch", response_model=S.RepoInfo,
+          dependencies=[Depends(require_editor)])
 def switch(name: str, body: S.SwitchRequest):
     with _repo_locks[name]:
         repo = _open_repo(name)
@@ -173,12 +271,31 @@ def switch(name: str, body: S.SwitchRequest):
         return _repo_info(repo, name)
 
 
+@app.delete("/repos/{name}/branches/{branch}", status_code=204)
+def delete_branch(name: str, branch: str, force: bool = Query(False)):
+    with _repo_locks[name]:
+        _open_repo(name).branch_delete(branch, force=force)
+
+
+@app.delete("/repos/{name}/tags/{tag}", status_code=204)
+def delete_tag(name: str, tag: str):
+    with _repo_locks[name]:
+        _open_repo(name).tag_delete(tag)
+
+
+@app.post("/repos/{name}/gc")
+def run_gc(name: str):
+    with _repo_locks[name]:
+        return _open_repo(name).gc()
+
+
 @app.get("/repos/{name}/tags", response_model=list[S.TagInfo])
 def tags(name: str):
     return _open_repo(name).tags()
 
 
-@app.post("/repos/{name}/tags", response_model=S.TagInfo, status_code=201)
+@app.post("/repos/{name}/tags", response_model=S.TagInfo, status_code=201,
+          dependencies=[Depends(require_editor)])
 def create_tag(name: str, body: S.TagCreate):
     with _repo_locks[name]:
         repo = _open_repo(name)
@@ -219,8 +336,70 @@ def _do_merge(name: str, branch: str, author: str, message: str | None,
                                author=author)
 
 
+@app.get("/repos/{name}/diff/visual")
+def diff_visual(name: str, ref_a: str = Query(...), ref_b: str = Query(...),
+                path: str = Query(...)):
+    """SVG con overlay de cambios entre dos versiones de un DXF.
+
+    Inmutable por par de refs+path → Cache-Control immutable; un proxy
+    o CDN puede cachearlo para siempre."""
+    import tempfile as _tf
+    from .. import visualdiff
+    from ..cache import render_cache
+    repo = _open_repo(name)
+    ta = repo._tree(repo.resolve(ref_a))
+    tb = repo._tree(repo.resolve(ref_b))
+    if path not in ta or path not in tb:
+        raise HTTPException(404, f"{path} no existe en ambas refs")
+    if not path.lower().endswith(".dxf"):
+        raise HTTPException(422, "diff visual solo soporta DXF")
+    sha_a, sha_b = ta[path]["blob_sha"], tb[path]["blob_sha"]
+    # Inmutable por par de SHAs de contenido → cacheable para siempre.
+    cache = render_cache()
+    ckey = cache.diff_key(name, sha_a, sha_b)
+    svg_text = cache.get(ckey)
+    if svg_text is None:
+        with _tf.TemporaryDirectory() as td:
+            pa, pb = Path(td) / "a.dxf", Path(td) / "b.dxf"
+            repo.store.get(sha_a, pa)
+            repo.store.get(sha_b, pb)
+            svg_text = visualdiff.render_diff_svg(pa, pb)
+        cache.set(ckey, svg_text)
+    return Response(svg_text, media_type="image/svg+xml",
+                    headers={"Cache-Control":
+                             "public, max-age=31536000, immutable"})
+
+
+@app.get("/repos/{name}/render/{file_path:path}")
+def render_version(name: str, file_path: str, ref: str = Query("HEAD")):
+    """SVG de una versión concreta (visor / thumbnail)."""
+    import tempfile as _tf
+    from .. import visualdiff
+    from ..cache import render_cache
+    repo = _open_repo(name)
+    tree = repo._tree(repo.resolve(ref))
+    if file_path not in tree:
+        raise HTTPException(404, f"{file_path} no existe en {ref}")
+    if not file_path.lower().endswith(".dxf"):
+        raise HTTPException(422, "render solo soporta DXF")
+    sha = tree[file_path]["blob_sha"]
+    cache = render_cache()
+    ckey = cache.version_key(name, sha)
+    svg_text = cache.get(ckey)
+    if svg_text is None:
+        with _tf.TemporaryDirectory() as td:
+            p = Path(td) / "v.dxf"
+            repo.store.get(sha, p)
+            svg_text = visualdiff.render_version_svg(p)
+        cache.set(ckey, svg_text)
+    return Response(svg_text, media_type="image/svg+xml",
+                    headers={"Cache-Control":
+                             "public, max-age=31536000, immutable"})
+
+
 @app.post("/repos/{name}/merge",
           response_model=S.MergeResponse,
+          dependencies=[Depends(require_editor)],
           responses={409: {"model": S.MergeConflictResponse,
                            "description": "Conflictos de merge"}})
 def merge(name: str, body: S.MergeRequest,
@@ -230,6 +409,7 @@ def merge(name: str, body: S.MergeRequest,
 
 @app.post("/repos/{name}/merge/resolve",
           response_model=S.MergeResponse,
+          dependencies=[Depends(require_editor)],
           responses={409: {"model": S.MergeConflictResponse,
                            "description": "Quedan conflictos sin resolver"}})
 def merge_resolve(name: str, body: S.MergeResolveRequest,
@@ -289,7 +469,8 @@ def list_locks(name: str):
                        expires_at=r["expires_at"]) for r in rows]
 
 
-@app.post("/repos/{name}/locks", response_model=S.LockInfo, status_code=201)
+@app.post("/repos/{name}/locks", response_model=S.LockInfo, status_code=201,
+          dependencies=[Depends(require_editor)])
 def acquire_lock(name: str, body: S.LockRequest,
                  who: Principal = Depends(get_principal)):
     with _repo_locks[name]:
@@ -302,8 +483,25 @@ def acquire_lock(name: str, body: S.LockRequest,
                           expires_at=row["expires_at"])
 
 
-@app.delete("/repos/{name}/locks/{file_path:path}", status_code=204)
+@app.delete("/repos/{name}/locks/{file_path:path}", status_code=204,
+            dependencies=[Depends(require_editor)])
 def release_lock(name: str, file_path: str, force: bool = Query(False),
                  who: Principal = Depends(get_principal)):
+    if force and not who.has_role("admin"):
+        raise HTTPException(403, "force unlock requiere rol admin")
     with _repo_locks[name]:
         _open_repo(name).unlock(file_path, who.username, force=force)
+
+
+# ----------------------------------------------------------- web UI
+@app.get("/", include_in_schema=False)
+def root():
+    """Atajo: la app web vive en /ui/."""
+    return RedirectResponse("/ui/")
+
+
+# El shell estático del UI (HTML/JS/CSS) se sirve sin auth; las llamadas
+# que hace a la API sí pasan por la autenticación. Como mount ASGI, queda
+# fuera de la dependencia global require_viewer.
+_WEB_DIR = Path(__file__).resolve().parent.parent / "web"
+app.mount("/ui", StaticFiles(directory=str(_WEB_DIR), html=True), name="ui")

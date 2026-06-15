@@ -129,6 +129,11 @@ class BlameEntry(BaseModel):
     message: str | None = None
 
 
+class StageRequest(BaseModel):
+    sha256: str = Field(min_length=64, max_length=64)
+    size: int = Field(ge=0)
+
+
 class UploadResponse(BaseModel):
     path: str
     sha256: str

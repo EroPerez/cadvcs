@@ -40,6 +40,8 @@ cadvcs lock plano.dxf --user ero     # pesimista, para binarios no mergeables
 cadvcs checkout plano.dxf --ref v1.0 --out plano_v1.dxf
 ```
 
+El comando tiene un alias corto `cad` (`cad commit ...`). Tras `cad login` —que guarda tu token de sesión— `--user` es opcional: la identidad sale del token (o de `CADVCS_USER`). Ver la sección "Sesión y alias del CLI" más abajo.
+
 ## El merge a nivel de entidad
 
 La pieza diferencial. Con base = merge-base(ours, theirs), cada handle DXF se clasifica en cada lado como unchanged/modified/added/deleted:
@@ -132,7 +134,7 @@ Semántica HTTP: 409 para conflictos de merge con payload estructurado (handle, 
 }
 ```
 
-Seguridad MVP: validación de slug de repo, guard anti path-traversal en rutas de archivo (incluida la forma URL-encoded), y la dir `.cadvcs` inaccesible vía API. Test end-to-end en `test_api.py` (24 checks: flujo completo de ramas y merge vía HTTP, 409 estructurado, 423 de locks, descarga histórica).
+Seguridad MVP: validación de slug de repo, guard anti path-traversal en rutas de archivo (incluida la forma URL-encoded), y la dir `.cadvcs` inaccesible vía API. Test end-to-end en `tests/test_api.py` (24 checks: flujo completo de ramas y merge vía HTTP, 409 estructurado, 423 de locks, descarga histórica).
 
 ## Resolución interactiva de conflictos
 
@@ -162,3 +164,70 @@ uvicorn cadvcs.api.main:app
 ```
 
 Sin issuer configurado la API arranca en modo dev sin auth (principal `dev`) con warning explícito. El test suite genera su propio par RSA y JWKS, firma tokens reales para dos usuarios y cubre los 401 (sin token, firma ajena, expirado, audience incorrecta) además del flujo completo de resolución.
+
+## Blob store en S3/OCI
+
+Los blobs pueden vivir en object storage S3-compatible definiendo `CADVCS_BLOB_URL=s3://bucket/prefijo` (credenciales por la cadena estándar de AWS; `CADVCS_S3_ENDPOINT` para MinIO, OCI Object Storage en modo S3-compat o LocalStack). La interfaz es idéntica al backend local —misma clave SHA-256 con sharding `objects/ab/cdef...`— así que `repo.py` no cambia. El bucket es global: la deduplicación funciona también **entre repositorios** (dos repos con el mismo plano comparten blob). La descarga por la API pasa a streaming desde el store, sin tocar disco intermedio. Suite específica en `tests/test_s3.py` (moto), también en CI.
+## Producción
+
+La metadata puede vivir en **PostgreSQL** definiendo `CADVCS_DB_URL` (formato `postgresql://user:pass@host/db`): un schema por repositorio mantiene el SQL idéntico entre backends y aísla repos entre sí. Sin la variable, cada repo usa su SQLite local como siempre. El wrapper de conexión normaliza paramstyle, `INSERT OR IGNORE`/`ON CONFLICT`, transacciones e ids autogenerados; los timestamps son TEXT UTC en ambos para que la expiración de locks compare igual. Ambas suites corren contra los dos backends en CI.
+
+Despliegue con Docker:
+
+```bash
+cp .env.example .env   # definir POSTGRES_PASSWORD y el issuer OIDC
+docker compose up -d   # PostgreSQL 16 + API con healthchecks
+curl localhost:8000/health
+```
+
+`GET /health` (sin token: es la sonda de Kubernetes/LB) verifica conectividad de metadata y escritura en storage, y reporta el backend activo. La imagen corre como usuario no privilegiado con `HEALTHCHECK` integrado.
+
+## Tests
+
+Las suites de script (`demo.py`, `tests/test_api.py`, `tests/test_s3.py`, `tests/test_async.py`, `tests/test_presigned.py`, `tests/test_ui.py`, `tests/test_infra.py`, `tests/test_cli_auth.py`) cubren integración end-to-end y corren en CI sobre ambos backends (SQLite y PostgreSQL). Además, `tests/` contiene **property-based tests** del motor de merge con hypothesis: generan cientos de configuraciones aleatorias de cambios base/ours/theirs y verifican invariantes (sin pérdida espuria, cambios de un lado preservados, convergencia, detección de conflictos, totalidad de la resolución, determinismo). `pytest` es el runner unificado (`python -m pytest`); el adaptador `tests/test_script_suites.py` ejecuta las suites de script para una migración incremental.
+## Indexado asíncrono
+
+El parseo de entidades DXF sale del path de commit mediante **transactional outbox**: el commit escribe un evento `pending` en `index_outbox` en su misma transacción, y `python -m cadvcs.worker` lo drena en segundo plano (multi-repo sobre `CADVCS_DATA`, `--once` para CI o polling con backoff para despliegue). La correctitud no depende del worker: si un diff/merge/blame toca un blob aún no indexado, `_entities_for_blob` lo indexa bajo demanda y cierra el evento, así que el worker solo reduce latencia. `docker-compose.yml` incluye el servicio worker. Suite en `tests/test_async.py`, en CI sobre ambos backends.
+
+## Subida y descarga directas a object storage (presigned)
+
+Con backend S3, el servidor puede salir del path de bytes para archivos grandes (modelo Git-LFS). Flujo de subida dedup-aware:
+
+1. El cliente calcula el SHA-256 en local y pide `POST /repos/{n}/blobs/{sha}/upload-url`. Si el blob ya existe → `{exists:true}` sin URL (cero transferencia). Si no → `{exists:false, upload_url}` (PUT presigned).
+2. El cliente hace `PUT` directo a object storage con esa URL — los bytes nunca pasan por la API.
+3. `PUT /repos/{n}/staged/{path}` con `{sha256,size}` registra el blob por referencia; el `commit` siguiente lo incluye sin leer bytes.
+
+Descarga: `GET /files/{path}?presigned=true` devuelve un `307` a una URL GET presigned (la descarga sale directa de S3). La subida/descarga por la API (`PUT/GET /files`) siguen disponibles para el backend local y archivos pequeños. Suite en `tests/test_presigned.py` (moto server por HTTP real), en CI sobre ambos backends.
+## Web UI
+
+Interfaz visual servida por la propia API en `/ui/` (redirect desde `/`). Cubre todo el sistema —historial, comparación con diff visual, fusión, autoría y bloqueos— y su pieza central es el **resolutor de conflictos**: ante un 409 de fusión, muestra cada entidad en discordia con sus dos lados y permite elegir ours/theirs por entidad, enviando las elecciones a `merge/resolve`. SPA en vanilla JS sin build; el shell es público y las llamadas de datos llevan el token. El lenguaje visual es la mesa de dibujo: papel blanco, azul de cianotipo y rojo de revisión semántico, con monoespaciada para todo dato (SHAs, handles, coordenadas). Verificado con un test de contrato UI↔API que comprueba que cada ruta invocada por el front existe en la API.
+
+## Infraestructura: conversión DWG, Kafka, Redis
+
+El sistema soporta tres servicios de producción, **todos opcionales con degradación a no-op**:
+
+- **Conversión DWG→DXF** (`CADVCS_DWG_CONVERTER`): un `.dwg` commiteado encola un evento `convert`; el worker genera su DXF espejo (registrado en `dwg_mirrors`), sobre el que operan diff, blame y render. Backend pluggable: `aspose` (Aspose.CAD, requiere licencia), `oda` (ODA File Converter vía `CADVCS_ODA_BIN`) o `none` (DWG como binario opaco). Spec 16.
+- **Eventos sobre Kafka** (`CADVCS_KAFKA_BROKERS`): el outbox (fuente de verdad transaccional) se publica en Kafka por un *relay* y lo consumen workers en un consumer group que escala horizontalmente. `python -m cadvcs.worker --mode relay|consume`. Sin Kafka, el worker de polling sigue funcionando. Spec 17.
+- **Cache de renders en Redis** (`CADVCS_REDIS_URL`): los SVG de render y diff visual son inmutables (dependen solo de los SHAs de contenido), así que se cachean por clave de SHAs sin invalidación. Sin Redis, se recomputa. Spec 18.
+
+`docker-compose.yml` levanta el stack completo (PostgreSQL, Redis, Kafka en KRaft, API, relay, consumer). `/health` reporta el estado de cada pieza. Suite en `tests/test_infra.py` (Redis real, bus Kafka en memoria, stub converter), en CI sobre ambos backends.
+
+## Sesión y alias del CLI
+
+El comando es `cadvcs` (instalado por `pip install -e .`), con alias corto `cad`. Para no pegar el token a mano en cada uso:
+
+```bash
+cad login --token <JWT>           # pegar una vez; se guarda en ~/.config/cadvcs
+cad login --user ana              # o password grant contra el IdP OIDC (pide contraseña)
+cad whoami                        # muestra usuario, roles y caducidad del token
+cad token                         # imprime el JWT (p.ej. curl -H "Authorization: Bearer $(cad token)")
+cad logout                        # borra la sesión
+```
+
+El token se guarda por servidor (`--server`, o `CADVCS_SERVER`) con permisos `0600`, así que puedes tener sesiones contra varios despliegues. Además, tras `login` los comandos que registran autoría (`commit`, `merge`, `lock`...) ya **no necesitan `--user`**: lo toman del token (o de `CADVCS_USER`). Solo lo pides si quieres commitear con otra identidad.
+
+## Despliegue en la nube
+
+Una sola imagen Docker sirve los tres roles según el comando: API (`uvicorn`), relay (`worker --mode relay`) y consumer (`worker --mode consume`). Como el estado está externalizado —PostgreSQL para metadata, object storage para blobs, Redis y Kafka opcionales—, API y workers son stateless y escalan horizontalmente.
+
+`deploy/k8s/` contiene manifiestos listos para un clúster gestionado (EKS/GKE/AKS): API con réplicas + Service + Ingress TLS + HPA, relay (1 réplica) y consumer (HPA, reparto por consumer group de Kafka), con `/health` como probe. Los servicios pesados se delegan a gestionados (RDS/Cloud SQL, S3/GCS, ElastiCache, MSK); sin Kafka, la topología se reduce a un único `worker --mode poll`. La migración de esquema es automática al arrancar. Detalle en la [spec 19](docs/specs/19-cloud-deployment.md) y en `deploy/k8s/README.md`. Para desarrollo, `docker-compose.yml` levanta el stack completo en local.
