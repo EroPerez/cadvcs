@@ -407,7 +407,7 @@ async function viewLog() {
   v.append(ul);
 }
 
-function showCommit(c) {
+async function showCommit(c) {
   const ctx = $("#ctx"); ctx.innerHTML = "";
   ctx.append(el("h2", {}, "Commit c" + c.id + (c.is_merge ? " · fusión" : "")));
   ctx.append(el("div", { className: "muted mono", style: "font-size:12px;margin-bottom:10px" },
@@ -416,6 +416,28 @@ function showCommit(c) {
   const lineage = [c.parent_id, c.parent2_id].filter(Boolean).map(p => "c" + p).join(", ");
   if (lineage) ctx.append(el("div", { className: "muted mono", style: "font-size:12px" },
     "padre(s): " + lineage));
+
+  if (c.parent_id == null) return;
+  try {
+    const d = await api("/repos/" + S.repo + "/diff?ref_a=" + c.parent_id + "&ref_b=" + c.id);
+    const container = el("div", { style: "margin-top:14px" });
+    container.append(el("div", { className: "eyebrow" }, "Cambios"));
+    for (const p of d.added) container.append(el("div", { className: "mono", style: "color:var(--added);font-size:12px" }, "+ " + p));
+    for (const p of d.removed) container.append(el("div", { className: "mono", style: "color:var(--revision);font-size:12px" }, "− " + p));
+    for (const [p, detail] of Object.entries(d.modified)) {
+      container.append(el("div", { className: "mono", style: "color:var(--modified);font-size:12px" }, "~ " + p));
+      if (detail && detail !== "binary") {
+        const sub = el("div", { style: "padding-left:16px;font-size:11px" });
+        if (detail.added && detail.added.length) sub.append(el("span", { className: "mono", style: "color:var(--added)" }, "+" + detail.added.length + " entidades  "));
+        if (detail.removed && detail.removed.length) sub.append(el("span", { className: "mono", style: "color:var(--revision)" }, "−" + detail.removed.length + " entidades  "));
+        if (detail.modified && detail.modified.length) sub.append(el("span", { className: "mono", style: "color:var(--modified)" }, "~" + detail.modified.length + " entidades"));
+        if (sub.childNodes.length) container.append(sub);
+      }
+    }
+    if (!d.added.length && !d.removed.length && !Object.keys(d.modified).length)
+      container.append(el("div", { className: "muted", style: "font-size:12px" }, "sin diferencias"));
+    ctx.append(container);
+  } catch (e) {}
 }
 
 // ——— Vista: Comparar (diff visual) ———
@@ -664,6 +686,8 @@ async function refList() {
   try {
     for (const b of await api("/repos/" + S.repo + "/branches")) out.push(b.name);
     for (const t of await api("/repos/" + S.repo + "/tags")) out.push(t.name);
+    const commits = await api("/repos/" + S.repo + "/commits?limit=50");
+    for (const c of commits) out.push(String(c.id));
   } catch (e) {}
   return out;
 }
@@ -676,7 +700,11 @@ async function dxfPaths() {
 }
 function refSelect(refs, sel) {
   const s = el("select");
-  for (const r of refs) s.append(el("option", { value: r, textContent: r, selected: r === sel }));
+  for (const r of refs) {
+    const isCommit = /^\d+$/.test(r);
+    const label = isCommit ? "c" + r : r;
+    s.append(el("option", { value: r, textContent: label, selected: r === sel }));
+  }
   return s;
 }
 function labelled(text, control) {
