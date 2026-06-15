@@ -134,7 +134,7 @@ Semántica HTTP: 409 para conflictos de merge con payload estructurado (handle, 
 }
 ```
 
-Seguridad MVP: validación de slug de repo, guard anti path-traversal en rutas de archivo (incluida la forma URL-encoded), y la dir `.cadvcs` inaccesible vía API. Test end-to-end en `test_api.py` (24 checks: flujo completo de ramas y merge vía HTTP, 409 estructurado, 423 de locks, descarga histórica).
+Seguridad MVP: validación de slug de repo, guard anti path-traversal en rutas de archivo (incluida la forma URL-encoded), y la dir `.cadvcs` inaccesible vía API. Test end-to-end en `tests/test_api.py` (24 checks: flujo completo de ramas y merge vía HTTP, 409 estructurado, 423 de locks, descarga histórica).
 
 ## Resolución interactiva de conflictos
 
@@ -167,7 +167,7 @@ Sin issuer configurado la API arranca en modo dev sin auth (principal `dev`) con
 
 ## Blob store en S3/OCI
 
-Los blobs pueden vivir en object storage S3-compatible definiendo `CADVCS_BLOB_URL=s3://bucket/prefijo` (credenciales por la cadena estándar de AWS; `CADVCS_S3_ENDPOINT` para MinIO, OCI Object Storage en modo S3-compat o LocalStack). La interfaz es idéntica al backend local —misma clave SHA-256 con sharding `objects/ab/cdef...`— así que `repo.py` no cambia. El bucket es global: la deduplicación funciona también **entre repositorios** (dos repos con el mismo plano comparten blob). La descarga por la API pasa a streaming desde el store, sin tocar disco intermedio. Suite específica en `test_s3.py` (moto), también en CI.
+Los blobs pueden vivir en object storage S3-compatible definiendo `CADVCS_BLOB_URL=s3://bucket/prefijo` (credenciales por la cadena estándar de AWS; `CADVCS_S3_ENDPOINT` para MinIO, OCI Object Storage en modo S3-compat o LocalStack). La interfaz es idéntica al backend local —misma clave SHA-256 con sharding `objects/ab/cdef...`— así que `repo.py` no cambia. El bucket es global: la deduplicación funciona también **entre repositorios** (dos repos con el mismo plano comparten blob). La descarga por la API pasa a streaming desde el store, sin tocar disco intermedio. Suite específica en `tests/test_s3.py` (moto), también en CI.
 ## Producción
 
 La metadata puede vivir en **PostgreSQL** definiendo `CADVCS_DB_URL` (formato `postgresql://user:pass@host/db`): un schema por repositorio mantiene el SQL idéntico entre backends y aísla repos entre sí. Sin la variable, cada repo usa su SQLite local como siempre. El wrapper de conexión normaliza paramstyle, `INSERT OR IGNORE`/`ON CONFLICT`, transacciones e ids autogenerados; los timestamps son TEXT UTC en ambos para que la expiración de locks compare igual. Ambas suites corren contra los dos backends en CI.
@@ -184,10 +184,10 @@ curl localhost:8000/health
 
 ## Tests
 
-Las suites de script (`demo.py`, `test_api.py`, `test_s3.py`, `test_async.py`, `test_presigned.py`, `test_ui.py`, `test_infra.py`, `test_cli_auth.py`) cubren integración end-to-end y corren en CI sobre ambos backends (SQLite y PostgreSQL). Además, `tests/` contiene **property-based tests** del motor de merge con hypothesis: generan cientos de configuraciones aleatorias de cambios base/ours/theirs y verifican invariantes (sin pérdida espuria, cambios de un lado preservados, convergencia, detección de conflictos, totalidad de la resolución, determinismo). `pytest` es el runner unificado (`python -m pytest`); el adaptador `tests/test_script_suites.py` ejecuta las suites de script para una migración incremental.
+Las suites de script (`demo.py`, `tests/test_api.py`, `tests/test_s3.py`, `tests/test_async.py`, `tests/test_presigned.py`, `tests/test_ui.py`, `tests/test_infra.py`, `tests/test_cli_auth.py`) cubren integración end-to-end y corren en CI sobre ambos backends (SQLite y PostgreSQL). Además, `tests/` contiene **property-based tests** del motor de merge con hypothesis: generan cientos de configuraciones aleatorias de cambios base/ours/theirs y verifican invariantes (sin pérdida espuria, cambios de un lado preservados, convergencia, detección de conflictos, totalidad de la resolución, determinismo). `pytest` es el runner unificado (`python -m pytest`); el adaptador `tests/test_script_suites.py` ejecuta las suites de script para una migración incremental.
 ## Indexado asíncrono
 
-El parseo de entidades DXF sale del path de commit mediante **transactional outbox**: el commit escribe un evento `pending` en `index_outbox` en su misma transacción, y `python -m cadvcs.worker` lo drena en segundo plano (multi-repo sobre `CADVCS_DATA`, `--once` para CI o polling con backoff para despliegue). La correctitud no depende del worker: si un diff/merge/blame toca un blob aún no indexado, `_entities_for_blob` lo indexa bajo demanda y cierra el evento, así que el worker solo reduce latencia. `docker-compose.yml` incluye el servicio worker. Suite en `test_async.py`, en CI sobre ambos backends.
+El parseo de entidades DXF sale del path de commit mediante **transactional outbox**: el commit escribe un evento `pending` en `index_outbox` en su misma transacción, y `python -m cadvcs.worker` lo drena en segundo plano (multi-repo sobre `CADVCS_DATA`, `--once` para CI o polling con backoff para despliegue). La correctitud no depende del worker: si un diff/merge/blame toca un blob aún no indexado, `_entities_for_blob` lo indexa bajo demanda y cierra el evento, así que el worker solo reduce latencia. `docker-compose.yml` incluye el servicio worker. Suite en `tests/test_async.py`, en CI sobre ambos backends.
 
 ## Subida y descarga directas a object storage (presigned)
 
@@ -197,7 +197,7 @@ Con backend S3, el servidor puede salir del path de bytes para archivos grandes 
 2. El cliente hace `PUT` directo a object storage con esa URL — los bytes nunca pasan por la API.
 3. `PUT /repos/{n}/staged/{path}` con `{sha256,size}` registra el blob por referencia; el `commit` siguiente lo incluye sin leer bytes.
 
-Descarga: `GET /files/{path}?presigned=true` devuelve un `307` a una URL GET presigned (la descarga sale directa de S3). La subida/descarga por la API (`PUT/GET /files`) siguen disponibles para el backend local y archivos pequeños. Suite en `test_presigned.py` (moto server por HTTP real), en CI sobre ambos backends.
+Descarga: `GET /files/{path}?presigned=true` devuelve un `307` a una URL GET presigned (la descarga sale directa de S3). La subida/descarga por la API (`PUT/GET /files`) siguen disponibles para el backend local y archivos pequeños. Suite en `tests/test_presigned.py` (moto server por HTTP real), en CI sobre ambos backends.
 ## Web UI
 
 Interfaz visual servida por la propia API en `/ui/` (redirect desde `/`). Cubre todo el sistema —historial, comparación con diff visual, fusión, autoría y bloqueos— y su pieza central es el **resolutor de conflictos**: ante un 409 de fusión, muestra cada entidad en discordia con sus dos lados y permite elegir ours/theirs por entidad, enviando las elecciones a `merge/resolve`. SPA en vanilla JS sin build; el shell es público y las llamadas de datos llevan el token. El lenguaje visual es la mesa de dibujo: papel blanco, azul de cianotipo y rojo de revisión semántico, con monoespaciada para todo dato (SHAs, handles, coordenadas). Verificado con un test de contrato UI↔API que comprueba que cada ruta invocada por el front existe en la API.
@@ -210,7 +210,7 @@ El sistema soporta tres servicios de producción, **todos opcionales con degrada
 - **Eventos sobre Kafka** (`CADVCS_KAFKA_BROKERS`): el outbox (fuente de verdad transaccional) se publica en Kafka por un *relay* y lo consumen workers en un consumer group que escala horizontalmente. `python -m cadvcs.worker --mode relay|consume`. Sin Kafka, el worker de polling sigue funcionando. Spec 17.
 - **Cache de renders en Redis** (`CADVCS_REDIS_URL`): los SVG de render y diff visual son inmutables (dependen solo de los SHAs de contenido), así que se cachean por clave de SHAs sin invalidación. Sin Redis, se recomputa. Spec 18.
 
-`docker-compose.yml` levanta el stack completo (PostgreSQL, Redis, Kafka en KRaft, API, relay, consumer). `/health` reporta el estado de cada pieza. Suite en `test_infra.py` (Redis real, bus Kafka en memoria, stub converter), en CI sobre ambos backends.
+`docker-compose.yml` levanta el stack completo (PostgreSQL, Redis, Kafka en KRaft, API, relay, consumer). `/health` reporta el estado de cada pieza. Suite en `tests/test_infra.py` (Redis real, bus Kafka en memoria, stub converter), en CI sobre ambos backends.
 
 ## Sesión y alias del CLI
 

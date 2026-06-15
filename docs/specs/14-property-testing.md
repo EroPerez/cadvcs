@@ -16,7 +16,7 @@ Las cuatro propiedades corren cientos de ejemplos cada una (200 + 150 + 80 + 150
 
 ## Decisiones de diseño
 
-`pytest` pasa a ser el runner unificado; `tests/test_script_suites.py` ejecuta las suites de script históricas (`demo.py`, `test_api.py`, y opcionalmente `test_s3`/`test_presigned` si están presentes y moto está instalado) como subprocesos, de modo que la migración a pytest es incremental y no big-bang: las suites existentes siguen siendo la fuente de verdad de la integración mientras las nuevas se escriben nativas. Un job de CI dedicado corre solo las property tests, sin servicios, para aislar fallos del motor.
+`pytest` pasa a ser el runner unificado; `tests/test_script_suites.py` ejecuta las suites de script históricas (`demo.py`, `tests/test_api.py`, y opcionalmente `test_s3`/`test_presigned` si están presentes y moto está instalado) como subprocesos, de modo que la migración a pytest es incremental y no big-bang: las suites existentes siguen siendo la fuente de verdad de la integración mientras las nuevas se escriben nativas. Un job de CI dedicado corre solo las property tests, sin servicios, para aislar fallos del motor.
 
 ## Limitaciones conocidas
 
