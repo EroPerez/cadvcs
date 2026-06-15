@@ -17,9 +17,16 @@
 | 11 | [Identidad de entidad por GUID](specs/11-entity-guids.md) | `identity.py` |
 | 12 | [Indexado asíncrono (outbox + worker)](specs/12-async-indexing.md) | `worker.py` |
 | 13 | [Subida/descarga presigned a S3](specs/13-presigned-urls.md) | `storage.py` |
+| 14 | [Property-based testing del merge](specs/14-property-testing.md) | `tests/` |
 | 15 | [Web UI](specs/15-web-ui.md) | `web/index.html` |
+| 16 | [Conversión DWG→DXF](specs/16-dwg-conversion.md) | `convert.py` |
+| 17 | [Eventos sobre Kafka](specs/17-kafka-events.md) | `bus.py` |
+| 18 | [Cache de renders en Redis](specs/18-redis-cache.md) | `cache.py` |
+| 19 | [Despliegue en la nube](specs/19-cloud-deployment.md) | `deploy/k8s/` |
 
 ## Otros documentos
+
+- [GUIA-PASO-A-PASO.md](GUIA-PASO-A-PASO.md) — guía de instalación y uso desde cero, paso a paso
 
 - [IMPROVEMENTS.md](IMPROVEMENTS.md) — backlog razonado de mejoras
 - [../ARCHITECTURE.md](../ARCHITECTURE.md) — arquitectura objetivo de producción

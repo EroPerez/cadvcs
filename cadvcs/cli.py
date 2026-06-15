@@ -37,6 +37,119 @@ def _print_semdiff(rp, d, indent="  "):
             print(f"{indent}      {attr}: {ch['old']} → {ch['new']}")
 
 
+class _CliError(Exception):
+    pass
+
+
+def _user(args) -> str:
+    """Resuelve el autor de una operación sin obligar a teclear --user cada vez.
+
+    Orden de preferencia: --user explícito → variable CADVCS_USER → nombre
+    de usuario del token de sesión guardado (claim preferred_username/sub).
+    Si nada de eso existe, error con instrucciones.
+    """
+    import os
+    from . import auth_store
+    if getattr(args, "user", None):
+        return args.user
+    env = os.environ.get("CADVCS_USER")
+    if env:
+        return env
+    tok = auth_store.get_token()
+    if tok:
+        try:
+            claims = auth_store.decode_claims(tok)
+            who = claims.get("preferred_username") or claims.get("sub")
+            if who:
+                return who
+        except Exception:
+            pass
+    raise _CliError(
+        "No sé quién eres. Pasa --user TU_NOMBRE, define CADVCS_USER, "
+        "o inicia sesión con 'cadvcs login'.")
+
+
+def _auth_command(args) -> int:
+    from . import auth_store
+    server = auth_store.normalize_server(args.server)
+
+    if args.cmd == "login":
+        token = args.token
+        if not token and args.user:
+            # Password grant contra el IdP OIDC
+            import getpass
+            from . import login as login_mod
+            password = args.password or getpass.getpass("Contraseña: ")
+            try:
+                token = login_mod.password_grant(
+                    args.user, password, issuer=args.issuer)
+            except login_mod.LoginError as exc:
+                print(f"Error de login: {exc}")
+                return 1
+        if not token:
+            # Pegar el token a mano (una sola vez)
+            try:
+                token = input("Pega tu token (JWT): ").strip()
+            except EOFError:
+                token = ""
+        if not token:
+            print("No se proporcionó token. Usa --token, o --user para "
+                  "password grant OIDC.")
+            return 1
+        auth_store.save_token(token, server)
+        # Mostrar a quién se ha guardado
+        try:
+            claims = auth_store.decode_claims(token)
+            who = claims.get("preferred_username") or claims.get("sub") or "?"
+            roles = claims.get(__import__("os").environ.get(
+                "CADVCS_ROLE_CLAIM", "roles"), [])
+            extra = f" como {who}" + (f" (roles: {roles})" if roles else "")
+        except Exception:
+            extra = ""
+        print(f"Sesión guardada para {server}{extra}.")
+        if auth_store.is_expired(token):
+            print("  Aviso: este token ya está caducado.")
+        return 0
+
+    if args.cmd == "logout":
+        if auth_store.clear_token(args.server):
+            print(f"Sesión cerrada para {server}.")
+        else:
+            print(f"No había sesión guardada para {server}.")
+        return 0
+
+    if args.cmd == "whoami":
+        tok = auth_store.get_token(args.server)
+        if not tok:
+            print(f"No hay sesión para {server}. Inicia con 'cadvcs login'.")
+            return 1
+        try:
+            claims = auth_store.decode_claims(tok)
+        except Exception as exc:
+            print(f"El token guardado no es un JWT válido: {exc}")
+            return 1
+        import os as _os, time as _time
+        who = claims.get("preferred_username") or claims.get("sub") or "?"
+        roles = claims.get(_os.environ.get("CADVCS_ROLE_CLAIM", "roles"), [])
+        print(f"Servidor:  {server}")
+        print(f"Usuario:   {who}")
+        print(f"Roles:     {roles or '(ninguno)'}")
+        exp = claims.get("exp")
+        if exp:
+            left = int(exp - _time.time())
+            estado = "caducado" if left <= 0 else f"caduca en {left//60} min"
+            print(f"Token:     {estado}")
+        return 0
+
+    if args.cmd == "token":
+        tok = auth_store.get_token(args.server)
+        if not tok:
+            return 1  # silencioso: pensado para $(cadvcs token) en scripts
+        print(tok)
+        return 0
+    return 1
+
+
 def main(argv=None):
     p = argparse.ArgumentParser(prog="cadvcs")
     p.add_argument("--repo", default=".")
@@ -48,7 +161,7 @@ def main(argv=None):
     s = sub.add_parser("add"); s.add_argument("files", nargs="+")
 
     s = sub.add_parser("commit")
-    s.add_argument("--user", required=True)
+    s.add_argument("--user", default=None)
     s.add_argument("-m", "--message", default="")
 
     s = sub.add_parser("log")
@@ -71,7 +184,7 @@ def main(argv=None):
     s.add_argument("ref_a"); s.add_argument("ref_b")
 
     s = sub.add_parser("merge")
-    s.add_argument("branch"); s.add_argument("--user", required=True)
+    s.add_argument("branch"); s.add_argument("--user", default=None)
     s.add_argument("-m", "--message", default=None)
     s.add_argument("--resolve", action="append", default=[],
                    metavar="PATH:HANDLE=CHOICE",
@@ -79,7 +192,7 @@ def main(argv=None):
                         "(repetible; '__file__' para binarios)")
 
     s = sub.add_parser("cherry-pick")
-    s.add_argument("ref"); s.add_argument("--user", required=True)
+    s.add_argument("ref"); s.add_argument("--user", default=None)
     s.add_argument("-m", "--message", default=None)
 
     s = sub.add_parser("blame")
@@ -87,7 +200,7 @@ def main(argv=None):
 
     for name in ("lock", "unlock"):
         s = sub.add_parser(name)
-        s.add_argument("file"); s.add_argument("--user", required=True)
+        s.add_argument("file"); s.add_argument("--user", default=None)
         if name == "unlock":
             s.add_argument("--force", action="store_true")
 
@@ -95,8 +208,32 @@ def main(argv=None):
     s.add_argument("file"); s.add_argument("--ref", default="HEAD")
     s.add_argument("--out", default=None)
 
+    # --- Gestión de sesión / login (evita pegar tokens a mano) ---
+    s = sub.add_parser("login", help="iniciar sesión y guardar el token")
+    s.add_argument("--server", default=None,
+                   help="URL de la API (default: CADVCS_SERVER o localhost:8000)")
+    s.add_argument("--token", default=None,
+                   help="pegar un JWT directamente (se guarda y no se pide más)")
+    s.add_argument("--user", default=None, help="usuario para password grant OIDC")
+    s.add_argument("--password", default=None,
+                   help="contraseña (si se omite con --user, se pide por teclado)")
+    s.add_argument("--issuer", default=None, help="issuer OIDC (default: CADVCS_OIDC_ISSUER)")
+
+    s = sub.add_parser("logout", help="cerrar sesión y borrar el token guardado")
+    s.add_argument("--server", default=None)
+
+    s = sub.add_parser("whoami", help="mostrar la identidad del token guardado")
+    s.add_argument("--server", default=None)
+
+    s = sub.add_parser("token", help="imprimir el token guardado (para curl, scripts)")
+    s.add_argument("--server", default=None)
+
     args = p.parse_args(argv)
     root = Path(args.repo)
+
+    # --- Comandos de sesión: no necesitan repositorio ---
+    if args.cmd in ("login", "logout", "whoami", "token"):
+        return _auth_command(args)
 
     try:
         if args.cmd == "init":
@@ -120,7 +257,7 @@ def main(argv=None):
                 print("  workdir limpio")
 
         elif args.cmd == "commit":
-            info = repo.commit(args.user, args.message)
+            info = repo.commit(_user(args), args.message)
             print(f"[{info['branch']} c{info['commit_id']}] "
                   f"{len(info['changed'])} archivo(s): {', '.join(info['changed'])}")
 
@@ -192,7 +329,7 @@ def main(argv=None):
                     return 2
                 resolutions.setdefault(rp, {})[handle] = choice
             try:
-                info = repo.merge(args.branch, args.user, args.message,
+                info = repo.merge(args.branch, _user(args), args.message,
                                   resolutions=resolutions or None)
                 if info["result"] == "already-up-to-date":
                     print("Ya actualizado")
@@ -216,7 +353,7 @@ def main(argv=None):
 
         elif args.cmd == "cherry-pick":
             try:
-                info = repo.cherry_pick(args.ref, args.user, args.message)
+                info = repo.cherry_pick(args.ref, _user(args), args.message)
                 if info["result"] == "empty":
                     print("Nada que aplicar (cambios ya presentes)")
                 else:
@@ -233,11 +370,12 @@ def main(argv=None):
                       f"layer={row['layer']}  «{row.get('message', '')}»")
 
         elif args.cmd == "lock":
-            repo.lock(args.file, args.user)
-            print(f"Lock: {args.file} → {args.user}")
+            u = _user(args)
+            repo.lock(args.file, u)
+            print(f"Lock: {args.file} → {u}")
 
         elif args.cmd == "unlock":
-            repo.unlock(args.file, args.user, force=args.force)
+            repo.unlock(args.file, _user(args), force=args.force)
             print(f"Unlock: {args.file}")
 
         elif args.cmd == "checkout":
@@ -246,6 +384,9 @@ def main(argv=None):
             print(f"Checkout {args.ref}:{args.file} → {out}")
 
         return 0
+    except _CliError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
     except CadVcsError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1

@@ -102,8 +102,20 @@ CREATE TABLE IF NOT EXISTS index_outbox (
     id         INTEGER PRIMARY KEY,
     blob_sha   TEXT NOT NULL,
     repo_key   TEXT NOT NULL,
+    kind       TEXT NOT NULL DEFAULT 'index',
     status     TEXT NOT NULL DEFAULT 'pending',
     attempts   INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%d %H:%M:%S', 'now'))
+);
+
+-- Espejo DWG→DXF: cada DWG convertido apunta al SHA de su DXF espejo,
+-- sobre el que opera el diff/blame de entidades. Content-addressed:
+-- el mismo DWG siempre produce el mismo dxf_sha (dada la misma versión
+-- del conversor), así que el espejo es estable y cacheable.
+CREATE TABLE IF NOT EXISTS dwg_mirrors (
+    dwg_sha   TEXT PRIMARY KEY,
+    dxf_sha   TEXT NOT NULL,
+    converter TEXT NOT NULL,
     created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%d %H:%M:%S', 'now'))
 );
 CREATE INDEX IF NOT EXISTS idx_outbox_pending
@@ -164,8 +176,15 @@ _PG_SCHEMA = [
     " id INTEGER GENERATED ALWAYS AS IDENTITY PRIMARY KEY,"
     " blob_sha TEXT NOT NULL,"
     " repo_key TEXT NOT NULL,"
+    " kind TEXT NOT NULL DEFAULT 'index',"
     " status TEXT NOT NULL DEFAULT 'pending',"
     " attempts INTEGER NOT NULL DEFAULT 0,"
+    f" created_at TEXT NOT NULL DEFAULT {_PG_NOW})",
+
+    "CREATE TABLE IF NOT EXISTS dwg_mirrors ("
+    " dwg_sha TEXT PRIMARY KEY,"
+    " dxf_sha TEXT NOT NULL,"
+    " converter TEXT NOT NULL,"
     f" created_at TEXT NOT NULL DEFAULT {_PG_NOW})",
 
     "CREATE INDEX IF NOT EXISTS idx_outbox_pending"
