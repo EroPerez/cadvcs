@@ -139,3 +139,47 @@ class UploadResponse(BaseModel):
     sha256: str
     size: int
     tracked: bool
+
+
+# ——— Auth / Users ———
+
+class RegisterRequest(BaseModel):
+    username: str = Field(min_length=3, max_length=32,
+                          pattern=r"^[a-zA-Z0-9][a-zA-Z0-9._-]{2,31}$")
+    email: str = Field(min_length=5, max_length=120)
+    password: str = Field(min_length=6, max_length=128)
+    full_name: str = Field(default="", max_length=120)
+
+
+class LoginRequest(BaseModel):
+    username: str = Field(description="Username o email")
+    password: str
+
+
+class AuthResponse(BaseModel):
+    access_token: str
+    token_type: str = "bearer"
+    expires_in: int
+    user: UserPublic
+
+
+class UserPublic(BaseModel):
+    id: int
+    username: str
+    email: str
+    full_name: str
+    role: str
+    created_at: str
+
+
+class ChangePasswordRequest(BaseModel):
+    current_password: str
+    new_password: str = Field(min_length=6, max_length=128)
+
+
+class UpdateRoleRequest(BaseModel):
+    role: str = Field(pattern=r"^(viewer|editor|admin)$")
+
+
+# Fix forward reference
+AuthResponse.model_rebuild()
