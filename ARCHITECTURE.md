@@ -5,9 +5,9 @@ Este documento define cómo llevar el MVP a un sistema multi-tenant en producci�
 ## Visión general
 
 ```
-┌─────────────────────────── Clientes ────────────────────────────┐
-│  Plugin AutoCAD (.NET API)   CLI (Python)   Web UI (viewer/diff) │
-└──────────────┬───────────────────┬─────────────────┬────────────┘
+┌──────────────────────────── Clientes ─────────────────────────────┐
+│  Plugin AutoCAD   CLI (push/pull/clone)   Web UI (viewer/diff)    │
+└──────────────┬──────────┬──────────────────────┬─────────────────┘
                │ HTTPS / OIDC      │                 │
         ┌──────▼───────────────────▼─────────────────▼──────┐
         │            API REST (FastAPI / Spring Boot)        │
@@ -40,6 +40,17 @@ Este documento define cómo llevar el MVP a un sistema multi-tenant en producci�
 El cliente nunca sube el archivo a través de la API. Calcula el SHA-256 en local y pide a la API un presigned URL de subida; si el blob ya existe en el object storage (dedup), la API responde "ya lo tengo" y se ahorra la transferencia completa — el mismo truco que usa Git LFS. Tras la subida, la API verifica el hash (el object storage puede validar checksum en el PUT), inserta el commit y sus entries en una transacción PostgreSQL, y publica `commit.created` en Kafka mediante el patrón transactional outbox para garantizar que metadata y evento son atómicos. Los workers consumen el evento: el de indexado extrae las entidades DXF y las persiste, el de conversión genera el DXF espejo de cada DWG (necesario porque el diff semántico opera sobre DXF), y el de render produce el SVG por versión que alimenta el diff visual con overlay de colores en la Web UI.
 
 El índice de entidades es la tabla que crece sin control si no se diseña bien: con planos de cientos de miles de entidades conviene particionar `entities` por hash de `blob_sha`, guardar en PostgreSQL solo `(handle, dxftype, layer, fingerprint)` y mover el `attrs_json` completo a un objeto comprimido en el object storage junto al blob, cargándolo solo cuando un merge o blame lo necesita.
+
+## Sincronización remota (push/pull/clone)
+
+El CLI soporta un flujo distribuido tipo Git: los usuarios trabajan en un repositorio local y sincronizan con el servidor central mediante `push` y `pull`. El protocolo de sincronización opera sobre los mismos objetos del modelo (blobs content-addressed + commits con entries):
+
+1. **Negociación**: el cliente obtiene las refs remotas (`sync/refs`) y compara con las locales para determinar qué commits faltan en cada dirección.
+2. **Transferencia de blobs**: antes de enviar commits, el cliente consulta qué blobs ya tiene el servidor (`sync/blobs/check`). Solo se transfieren los faltantes — la deduplicación por SHA-256 evita subir el mismo blob dos veces aunque esté en múltiples commits.
+3. **Pack de commits**: los commits se envían en orden topológico (padres primero) con sus entries. El servidor los aplica atómicamente y actualiza la ref de la rama.
+4. **Optimistic lock**: el push incluye el head esperado de la rama remota. Si la rama avanzó (otro usuario hizo push), el servidor rechaza con 409 — hay que hacer pull primero, igual que `git push` rechaza si hay cambios nuevos.
+
+`clone` descarga todas las ramas y materializa la working copy del branch por defecto. Los remotes se configuran en `.cadvcs/config.json` (múltiples servidores, cada uno con su token de autenticación).
 
 ## Locking distribuido
 
