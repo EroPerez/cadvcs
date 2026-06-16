@@ -493,6 +493,84 @@ def release_lock(name: str, file_path: str, force: bool = Query(False),
         _open_repo(name).unlock(file_path, who.username, force=force)
 
 
+# ----------------------------------------------------------- auth local
+from .users import UserStore, create_token, TOKEN_EXPIRE_MINUTES
+
+_users_db = DATA_DIR / "users.db"
+_user_store = UserStore(_users_db)
+
+
+@app.post("/auth/register", response_model=S.AuthResponse, status_code=201,
+          dependencies=[])
+def register(body: S.RegisterRequest, request: Request):
+    """Registro de usuario local. El primer usuario registrado recibe rol admin."""
+    is_first = _user_store.user_count() == 0
+    role = "admin" if is_first else "editor"
+    try:
+        user = _user_store.create_user(
+            username=body.username, email=body.email,
+            password=body.password, full_name=body.full_name, role=role)
+    except ValueError as exc:
+        raise HTTPException(409, str(exc))
+    token = create_token(user)
+    return S.AuthResponse(
+        access_token=token, token_type="bearer",
+        expires_in=TOKEN_EXPIRE_MINUTES * 60,
+        user=S.UserPublic(**user.model_dump()))
+
+
+@app.post("/auth/login", response_model=S.AuthResponse, dependencies=[])
+def login(body: S.LoginRequest, request: Request):
+    """Login con username/email y password. Devuelve JWT local."""
+    user = _user_store.authenticate(body.username, body.password)
+    if user is None:
+        raise HTTPException(401, "Credenciales invalidas")
+    token = create_token(user)
+    return S.AuthResponse(
+        access_token=token, token_type="bearer",
+        expires_in=TOKEN_EXPIRE_MINUTES * 60,
+        user=S.UserPublic(**user.model_dump()))
+
+
+@app.get("/auth/me", response_model=S.UserPublic)
+def me(who: Principal = Depends(get_principal)):
+    """Devuelve el perfil del usuario autenticado."""
+    user = _user_store.get_by_username(who.username)
+    if user is None:
+        return S.UserPublic(
+            id=0, username=who.username, email=who.email or "",
+            full_name="", role=who.roles[0] if who.roles else "viewer",
+            created_at="")
+    return S.UserPublic(**user.model_dump())
+
+
+@app.post("/auth/change-password", status_code=204)
+def change_password(body: S.ChangePasswordRequest,
+                    who: Principal = Depends(get_principal)):
+    """Cambiar password del usuario autenticado."""
+    user = _user_store.authenticate(who.username, body.current_password)
+    if user is None:
+        raise HTTPException(401, "Password actual incorrecta")
+    _user_store.update_password(who.username, body.new_password)
+
+
+@app.get("/auth/users", response_model=list[S.UserPublic],
+         dependencies=[Depends(require_admin)])
+def list_users():
+    """Listar usuarios (solo admin)."""
+    return [S.UserPublic(**u.model_dump()) for u in _user_store.list_users()]
+
+
+@app.put("/auth/users/{username}/role", response_model=S.UserPublic,
+         dependencies=[Depends(require_admin)])
+def update_user_role(username: str, body: S.UpdateRoleRequest):
+    """Cambiar rol de un usuario (solo admin)."""
+    user = _user_store.update_role(username, body.role)
+    if user is None:
+        raise HTTPException(404, f"Usuario '{username}' no encontrado")
+    return S.UserPublic(**user.model_dump())
+
+
 # ----------------------------------------------------------- web UI
 @app.get("/", include_in_schema=False)
 def root():

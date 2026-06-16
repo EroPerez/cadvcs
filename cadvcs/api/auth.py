@@ -102,6 +102,19 @@ def _signing_key(token: str):
     return _jwk_client().get_signing_key_from_jwt(token).key
 
 
+def _try_local_token(token: str) -> Principal | None:
+    """Intenta validar el token como JWT local (HS256, cadvcs-local)."""
+    from .users import decode_local_token
+    claims = decode_local_token(token)
+    if claims is None:
+        return None
+    username = (claims.get("preferred_username") or claims.get("email")
+                or claims["sub"])
+    return Principal(sub=claims["sub"], username=username,
+                     email=claims.get("email"),
+                     roles=claims.get("roles", list(DEFAULT_ROLES)))
+
+
 def get_principal(
     request: Request,
     creds: HTTPAuthorizationCredentials | None = Depends(_bearer),
@@ -110,17 +123,25 @@ def get_principal(
 
     /health queda fuera de la auth: es la sonda de liveness/readiness
     de Kubernetes y los load balancers, que no llevan token."""
-    if request.url.path == "/health":
-        # La sonda no lleva token: el principal debe pasar require_viewer,
-        # así que se le da rol admin (la sonda está fuera de la autorización).
-        return Principal(sub="healthcheck", username="healthcheck",
+    _public_paths = ("/health", "/auth/register", "/auth/login")
+    if request.url.path in _public_paths:
+        return Principal(sub="anonymous", username="anonymous",
                          roles=["admin"])
     if not AUTH_ENABLED:
+        if creds is not None:
+            local = _try_local_token(creds.credentials)
+            if local is not None:
+                return local
         return Principal(sub="dev", username="dev", roles=["admin"])
 
     if creds is None:
         raise HTTPException(401, "Falta el header Authorization: Bearer",
                             headers={"WWW-Authenticate": "Bearer"})
+
+    local = _try_local_token(creds.credentials)
+    if local is not None:
+        return local
+
     try:
         key = _signing_key(creds.credentials)
         claims = jwt.decode(

@@ -531,9 +531,204 @@
     background: var(--color-neutral-muted);
     border-radius: 4px;
   }
+
+  /* — Login overlay — */
+  .auth-overlay {
+    position: fixed;
+    inset: 0;
+    background: var(--color-canvas-subtle);
+    z-index: 100;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+  .auth-card {
+    background: var(--color-canvas-default);
+    border: 1px solid var(--color-border-default);
+    border-radius: var(--border-radius);
+    box-shadow: var(--shadow-lg);
+    width: 400px;
+    max-width: 90vw;
+    padding: 32px;
+  }
+  .auth-card h1 {
+    font-size: 24px;
+    font-weight: 600;
+    margin: 0 0 4px;
+    text-align: center;
+  }
+  .auth-card .subtitle {
+    text-align: center;
+    color: var(--color-fg-muted);
+    font-size: 14px;
+    margin-bottom: 24px;
+  }
+  .auth-card .logo {
+    text-align: center;
+    margin-bottom: 20px;
+  }
+  .auth-card .logo svg {
+    color: var(--color-fg-default);
+  }
+  .form-group {
+    margin-bottom: 16px;
+  }
+  .form-group label {
+    display: block;
+    font-size: var(--font-size-small);
+    font-weight: 600;
+    color: var(--color-fg-default);
+    margin-bottom: 6px;
+  }
+  .form-group input {
+    width: 100%;
+    border: 1px solid var(--color-border-default);
+    border-radius: var(--border-radius);
+    padding: 8px 12px;
+    font-family: var(--font-family);
+    font-size: var(--font-size-normal);
+    background: var(--color-canvas-default);
+    color: var(--color-fg-default);
+    outline: none;
+    transition: border-color .15s, box-shadow .15s;
+  }
+  .form-group input:focus {
+    border-color: var(--color-accent-emphasis);
+    box-shadow: 0 0 0 3px var(--color-accent-muted);
+  }
+  .auth-card .btn-block {
+    width: 100%;
+    justify-content: center;
+    padding: 8px 16px;
+    font-size: 14px;
+  }
+  .auth-card .error-msg {
+    background: var(--color-danger-subtle);
+    color: var(--color-danger-fg);
+    border: 1px solid rgba(209,36,47,0.2);
+    border-radius: var(--border-radius);
+    padding: 10px 14px;
+    font-size: 13px;
+    margin-bottom: 16px;
+    display: none;
+  }
+  .auth-switch {
+    text-align: center;
+    margin-top: 20px;
+    padding-top: 20px;
+    border-top: 1px solid var(--color-border-muted);
+    font-size: 13px;
+    color: var(--color-fg-muted);
+  }
+  .auth-switch a {
+    color: var(--color-accent-fg);
+    cursor: pointer;
+    font-weight: 600;
+    text-decoration: none;
+  }
+  .auth-switch a:hover { text-decoration: underline; }
+
+  /* — User menu in header — */
+  .user-menu {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    font-size: 13px;
+    color: rgba(255,255,255,0.9);
+  }
+  .user-avatar {
+    width: 28px;
+    height: 28px;
+    border-radius: 50%;
+    background: var(--color-accent-emphasis);
+    color: var(--color-fg-on-emphasis);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-weight: 700;
+    font-size: 12px;
+    text-transform: uppercase;
+  }
+  .user-menu .username {
+    font-weight: 600;
+    font-size: 13px;
+  }
+  .user-menu .role-badge {
+    font-family: var(--font-mono);
+    font-size: 11px;
+    background: rgba(255,255,255,0.15);
+    padding: 2px 8px;
+    border-radius: 20px;
+    color: rgba(255,255,255,0.7);
+  }
+  .btn-logout {
+    background: transparent;
+    border: 1px solid rgba(255,255,255,0.2);
+    color: rgba(255,255,255,0.7);
+    padding: 4px 10px;
+    border-radius: var(--border-radius);
+    cursor: pointer;
+    font-size: 12px;
+    font-family: var(--font-family);
+    transition: background .15s, color .15s;
+  }
+  .btn-logout:hover {
+    background: rgba(255,255,255,0.1);
+    color: var(--color-fg-on-emphasis);
+  }
 </style>
 </head>
 <body>
+<div id="authOverlay" class="auth-overlay" style="display:none">
+  <div class="auth-card">
+    <div class="logo">
+      <svg height="40" viewBox="0 0 24 24" width="40"><path d="M3 3h7v7H3zm11 0h7v7h-7zM3 14h7v7H3zm14 3.5a3.5 3.5 0 1 1-7 0 3.5 3.5 0 0 1 7 0z" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/></svg>
+    </div>
+    <div id="loginForm">
+      <h1>Iniciar sesion</h1>
+      <p class="subtitle">Control de versiones de planos CAD</p>
+      <div id="loginError" class="error-msg"></div>
+      <div class="form-group">
+        <label>Usuario o email</label>
+        <input type="text" id="loginUser" autocomplete="username">
+      </div>
+      <div class="form-group">
+        <label>Password</label>
+        <input type="password" id="loginPass" autocomplete="current-password">
+      </div>
+      <button class="btn btn-block" id="loginBtn">Iniciar sesion</button>
+      <div class="auth-switch">
+        No tienes cuenta? <a id="showRegister">Crear cuenta</a>
+      </div>
+    </div>
+    <div id="registerForm" style="display:none">
+      <h1>Crear cuenta</h1>
+      <p class="subtitle">El primer usuario sera administrador</p>
+      <div id="registerError" class="error-msg"></div>
+      <div class="form-group">
+        <label>Usuario</label>
+        <input type="text" id="regUser" autocomplete="username" placeholder="minimo 3 caracteres">
+      </div>
+      <div class="form-group">
+        <label>Email</label>
+        <input type="email" id="regEmail" autocomplete="email">
+      </div>
+      <div class="form-group">
+        <label>Nombre completo</label>
+        <input type="text" id="regName" autocomplete="name">
+      </div>
+      <div class="form-group">
+        <label>Password</label>
+        <input type="password" id="regPass" autocomplete="new-password" placeholder="minimo 6 caracteres">
+      </div>
+      <button class="btn btn-block" id="registerBtn">Crear cuenta</button>
+      <div class="auth-switch">
+        Ya tienes cuenta? <a id="showLogin">Iniciar sesion</a>
+      </div>
+    </div>
+  </div>
+</div>
+
 <header>
   <span class="brand">
     <svg height="20" viewBox="0 0 24 24" width="20"><path d="M3 3h7v7H3zm11 0h7v7h-7zM3 14h7v7H3zm14 3.5a3.5 3.5 0 1 1-7 0 3.5 3.5 0 0 1 7 0z" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/></svg>
@@ -542,10 +737,12 @@
   </span>
   <span class="spacer"></span>
   <span class="health" id="health"><span class="dot" style="background:#6e7781"></span>...</span>
-  <span class="token-field">
-    Token
-    <input id="token" placeholder="Bearer JWT (vacio en modo dev)" spellcheck="false">
-  </span>
+  <div id="userArea" class="user-menu" style="display:none">
+    <div id="userAvatar" class="user-avatar"></div>
+    <span id="userName" class="username"></span>
+    <span id="userRole" class="role-badge"></span>
+    <button class="btn-logout" id="logoutBtn">Salir</button>
+  </div>
 </header>
 
 <main>
@@ -589,7 +786,7 @@
 <script>
 "use strict";
 // ——— Estado minimo en memoria ———
-const S = { repo: null, branch: null, view: "log", repoInfo: null };
+const S = { repo: null, branch: null, view: "log", repoInfo: null, user: null };
 const $ = (s, r=document) => r.querySelector(s);
 const el = (t, props={}, ...kids) => {
   const n = Object.assign(document.createElement(t), props);
@@ -597,14 +794,15 @@ const el = (t, props={}, ...kids) => {
   return n;
 };
 
-const tokenInput = $("#token");
-tokenInput.value = sessionStorage.getItem("cadvcs_token") || "";
-tokenInput.addEventListener("change", () =>
-  sessionStorage.setItem("cadvcs_token", tokenInput.value.trim()));
+function getToken() { return sessionStorage.getItem("cadvcs_token") || ""; }
+function setToken(t) { sessionStorage.setItem("cadvcs_token", t); }
+function clearToken() { sessionStorage.removeItem("cadvcs_token"); sessionStorage.removeItem("cadvcs_user"); }
+function getStoredUser() { try { return JSON.parse(sessionStorage.getItem("cadvcs_user")); } catch { return null; } }
+function setStoredUser(u) { sessionStorage.setItem("cadvcs_user", JSON.stringify(u)); }
 
 async function api(path, opts={}) {
   const headers = Object.assign({}, opts.headers);
-  const tok = tokenInput.value.trim();
+  const tok = getToken();
   if (tok) headers["Authorization"] = "Bearer " + tok;
   if (opts.json !== undefined) {
     headers["Content-Type"] = "application/json";
@@ -615,6 +813,7 @@ async function api(path, opts={}) {
   const ct = res.headers.get("content-type") || "";
   const data = ct.includes("json") ? await res.json() : await res.text();
   if (!res.ok) {
+    if (res.status === 401 && path !== "/auth/login") { doLogout(); return; }
     const msg = (data && data.detail) ? data.detail : ("HTTP " + res.status);
     const e = new Error(typeof msg === "string" ? msg : JSON.stringify(msg));
     e.status = res.status; e.data = data;
@@ -626,7 +825,7 @@ async function svgInto(node, path) {
   node.innerHTML = '<span class="muted">renderizando...</span>';
   try {
     const headers = {};
-    const tok = tokenInput.value.trim();
+    const tok = getToken();
     if (tok) headers["Authorization"] = "Bearer " + tok;
     const res = await fetch(path, { headers });
     if (!res.ok) throw new Error("HTTP " + res.status);
@@ -638,6 +837,93 @@ function toast(msg, isErr=false) {
   const t = el("div", { className: "toast" + (isErr ? " err" : ""), textContent: msg });
   document.body.append(t);
   setTimeout(() => t.remove(), isErr ? 4200 : 2400);
+}
+
+// ——— Auth ———
+function showAuth(mode) {
+  $("#authOverlay").style.display = "flex";
+  $("#loginForm").style.display = mode === "login" ? "block" : "none";
+  $("#registerForm").style.display = mode === "register" ? "block" : "none";
+  $("#loginError").style.display = "none";
+  $("#registerError").style.display = "none";
+}
+function hideAuth() { $("#authOverlay").style.display = "none"; }
+
+function showUserUI(user) {
+  S.user = user;
+  setStoredUser(user);
+  hideAuth();
+  const area = $("#userArea"); area.style.display = "flex";
+  $("#userAvatar").textContent = (user.username || "?")[0];
+  $("#userName").textContent = user.username;
+  $("#userRole").textContent = user.role;
+}
+
+function doLogout() {
+  clearToken();
+  S.user = null;
+  $("#userArea").style.display = "none";
+  showAuth("login");
+}
+
+$("#showRegister").onclick = (e) => { e.preventDefault(); showAuth("register"); };
+$("#showLogin").onclick = (e) => { e.preventDefault(); showAuth("login"); };
+$("#logoutBtn").onclick = () => { doLogout(); toast("Sesion cerrada"); };
+
+$("#loginBtn").onclick = async () => {
+  const user = $("#loginUser").value.trim();
+  const pass = $("#loginPass").value;
+  if (!user || !pass) return;
+  $("#loginError").style.display = "none";
+  try {
+    const r = await api("/auth/login", { method: "POST", json: { username: user, password: pass } });
+    setToken(r.access_token);
+    showUserUI(r.user);
+    toast("Bienvenido, " + r.user.username);
+    loadRepos();
+  } catch (e) {
+    $("#loginError").textContent = e.message || "Credenciales invalidas";
+    $("#loginError").style.display = "block";
+  }
+};
+
+$("#registerBtn").onclick = async () => {
+  const user = $("#regUser").value.trim();
+  const email = $("#regEmail").value.trim();
+  const name = $("#regName").value.trim();
+  const pass = $("#regPass").value;
+  if (!user || !email || !pass) return;
+  $("#registerError").style.display = "none";
+  try {
+    const r = await api("/auth/register", { method: "POST", json: {
+      username: user, email: email, password: pass, full_name: name } });
+    setToken(r.access_token);
+    showUserUI(r.user);
+    toast("Cuenta creada: " + r.user.username);
+    loadRepos();
+  } catch (e) {
+    $("#registerError").textContent = e.message || "Error al registrar";
+    $("#registerError").style.display = "block";
+  }
+};
+
+["loginUser", "loginPass"].forEach(id =>
+  $(  "#" + id).addEventListener("keydown", e => { if (e.key === "Enter") $("#loginBtn").click(); }));
+["regUser", "regEmail", "regName", "regPass"].forEach(id =>
+  $("#" + id).addEventListener("keydown", e => { if (e.key === "Enter") $("#registerBtn").click(); }));
+
+async function checkAuth() {
+  const tok = getToken();
+  if (!tok) { showAuth("login"); return; }
+  try {
+    const user = await api("/auth/me");
+    showUserUI(user);
+    loadRepos();
+  } catch (e) {
+    const stored = getStoredUser();
+    if (stored) { showUserUI(stored); loadRepos(); }
+    else showAuth("login");
+  }
 }
 
 // ——— Health ———
@@ -1079,7 +1365,8 @@ function ctxHint(title, body) {
 }
 
 // ——— Arranque ———
-refreshHealth(); loadRepos();
+refreshHealth();
+checkAuth();
 setInterval(refreshHealth, 15000);
 </script>
 </body>
