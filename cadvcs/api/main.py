@@ -571,6 +571,234 @@ def update_user_role(username: str, body: S.UpdateRoleRequest):
     return S.UserPublic(**user.model_dump())
 
 
+# ----------------------------------------------------------- sync (push/pull)
+
+@app.get("/repos/{name}/sync/refs")
+def sync_refs(name: str):
+    """Return all branch and tag refs for sync negotiation."""
+    repo = _open_repo(name)
+    branches_list = repo.branches()
+    tags_list = repo.tags()
+    return {
+        "branches": {b["name"]: b["head_commit_id"] for b in branches_list},
+        "tags": {t["name"]: t["commit_id"] for t in tags_list},
+    }
+
+
+@app.post("/repos/{name}/sync/negotiate")
+def sync_negotiate(name: str, body: S.SyncNegotiateRequest):
+    """Given client commit IDs, return which ones the server has/needs."""
+    repo = _open_repo(name)
+    known = set()
+    unknown = set()
+    for cid in body.commit_ids:
+        row = repo.conn.execute(
+            "SELECT id FROM commits WHERE id = ?", (cid,)).fetchone()
+        if row:
+            known.add(cid)
+        else:
+            unknown.add(cid)
+    return {"known": sorted(known), "unknown": sorted(unknown)}
+
+
+@app.post("/repos/{name}/sync/push",
+          dependencies=[Depends(require_editor)])
+def sync_push(name: str, body: S.SyncPushRequest,
+              who: Principal = Depends(get_principal)):
+    """Receive a pack of commits from a client and apply them.
+
+    Commits must be in topological order. Blob data must already be
+    uploaded via sync/blobs/{sha}. Branch ref is updated atomically.
+    """
+    with _repo_locks[name]:
+        repo = _open_repo(name)
+
+        # Optimistic lock: if client expects a specific head, verify it
+        if body.branch_head is not None:
+            row = repo.conn.execute(
+                "SELECT head_commit_id FROM branches WHERE name = ?",
+                (body.branch,)).fetchone()
+            remote_head = row["head_commit_id"] if row else None
+            if remote_head != body.branch_head:
+                raise HTTPException(
+                    409, f"Branch {body.branch} has moved: expected "
+                         f"c{body.branch_head}, actual c{remote_head}. "
+                         f"Pull first.")
+
+        # Map client commit IDs → server commit IDs
+        id_map: dict[int, int] = {}
+        # Pre-populate with existing commits (for parent references)
+        all_existing = repo.conn.execute("SELECT id FROM commits").fetchall()
+        for r in all_existing:
+            id_map[r["id"]] = r["id"]
+
+        new_commits = []
+        for cd in body.commits:
+            # Map parent IDs
+            p1 = id_map.get(cd.parent_id) if cd.parent_id else None
+            p2 = id_map.get(cd.parent2_id) if cd.parent2_id else None
+
+            # Verify all blobs exist
+            for rp, entry in cd.entries.items():
+                if not repo.store.exists(entry["blob_sha"]):
+                    raise HTTPException(
+                        422, f"Blob {entry['blob_sha']} not found. "
+                             f"Upload blobs before pushing commits.")
+
+            with repo.conn:
+                cid = repo.conn.insert_id(
+                    "INSERT INTO commits (parent_id, parent2_id, author, "
+                    "message, created_at) VALUES (?, ?, ?, ?, ?)",
+                    (p1, p2, cd.author, cd.message, cd.created_at))
+                repo.conn.executemany(
+                    "INSERT INTO commit_entries (commit_id, repo_path, "
+                    "blob_sha, size_bytes) VALUES (?, ?, ?, ?)",
+                    [(cid, rp, e["blob_sha"], e["size_bytes"])
+                     for rp, e in cd.entries.items()])
+            new_commits.append(cid)
+            # Map the original client-side ordering index
+            id_map[len(id_map)] = cid
+
+        # Update branch ref
+        last_cid = new_commits[-1] if new_commits else None
+        if last_cid:
+            with repo.conn:
+                existing = repo.conn.execute(
+                    "SELECT 1 FROM branches WHERE name = ?",
+                    (body.branch,)).fetchone()
+                if existing:
+                    repo.conn.execute(
+                        "UPDATE branches SET head_commit_id = ? WHERE name = ?",
+                        (last_cid, body.branch))
+                else:
+                    repo.conn.execute(
+                        "INSERT INTO branches (name, head_commit_id) "
+                        "VALUES (?, ?)", (body.branch, last_cid))
+
+        return {"pushed": len(new_commits),
+                "branch": body.branch,
+                "head_commit_id": last_cid}
+
+
+@app.get("/repos/{name}/sync/pull")
+def sync_pull(name: str, branch: str = Query(...),
+              since: int | None = Query(None)):
+    """Return commits on a branch since a given commit ID.
+
+    Returns commits in topological order (oldest first) with their
+    entries, plus the list of blob SHAs needed.
+    """
+    repo = _open_repo(name)
+    row = repo.conn.execute(
+        "SELECT head_commit_id FROM branches WHERE name = ?",
+        (branch,)).fetchone()
+    if not row:
+        raise HTTPException(404, f"Branch {branch} not found")
+    head = row["head_commit_id"]
+    if head is None:
+        return {"commits": [], "blobs": [], "head_commit_id": None}
+
+    # Walk the commit chain, collect commits after 'since'
+    commits_data = []
+    blob_shas = set()
+    cid = head
+    since_ancestors = set()
+    if since is not None:
+        # Collect all ancestors of 'since' to know where to stop
+        since_ancestors = repo._ancestors(since)
+        since_ancestors.add(since)
+
+    # Walk the DAG breadth-first to get all commits not in since_ancestors
+    from collections import deque
+    queue = deque([head])
+    visited = set()
+    while queue:
+        cid = queue.popleft()
+        if cid in visited or cid in since_ancestors:
+            continue
+        visited.add(cid)
+        row = repo.conn.execute(
+            "SELECT id, parent_id, parent2_id, author, message, created_at "
+            "FROM commits WHERE id = ?", (cid,)).fetchone()
+        if not row:
+            continue
+        entries = repo.conn.execute(
+            "SELECT repo_path, blob_sha, size_bytes FROM commit_entries "
+            "WHERE commit_id = ?", (cid,)).fetchall()
+        entry_map = {e["repo_path"]: {"blob_sha": e["blob_sha"],
+                                       "size_bytes": e["size_bytes"]}
+                     for e in entries}
+        for e in entries:
+            blob_shas.add(e["blob_sha"])
+        commits_data.append({
+            "id": row["id"],
+            "parent_id": row["parent_id"],
+            "parent2_id": row["parent2_id"],
+            "author": row["author"],
+            "message": row["message"],
+            "created_at": row["created_at"],
+            "entries": entry_map,
+        })
+        if row["parent_id"]:
+            queue.append(row["parent_id"])
+        if row["parent2_id"]:
+            queue.append(row["parent2_id"])
+
+    # Sort topologically (parents first)
+    commits_data.sort(key=lambda c: c["id"])
+
+    return {"commits": commits_data, "blobs": sorted(blob_shas),
+            "head_commit_id": head}
+
+
+@app.put("/repos/{name}/sync/blobs/{sha}",
+         dependencies=[Depends(require_editor)])
+def sync_upload_blob(name: str, sha: str,
+                     body: bytes = Body(media_type="application/octet-stream")):
+    """Upload a raw blob by SHA for sync operations."""
+    import hashlib
+    actual = hashlib.sha256(body).hexdigest()
+    if actual != sha:
+        raise HTTPException(422, f"SHA mismatch: expected {sha}, got {actual}")
+    repo = _open_repo(name)
+    if not repo.store.exists(sha):
+        import tempfile
+        with tempfile.NamedTemporaryFile(delete=False) as tmp:
+            tmp.write(body)
+            tmp_path = Path(tmp.name)
+        try:
+            repo.store.put(tmp_path)
+        finally:
+            tmp_path.unlink(missing_ok=True)
+    return {"sha": sha, "size": len(body), "existed": False}
+
+
+@app.get("/repos/{name}/sync/blobs/{sha}")
+def sync_download_blob(name: str, sha: str):
+    """Download a raw blob by SHA."""
+    repo = _open_repo(name)
+    if not repo.store.exists(sha):
+        raise HTTPException(404, f"Blob {sha} not found")
+    return StreamingResponse(
+        repo.store.open(sha),
+        media_type="application/octet-stream",
+        headers={"X-Blob-Sha256": sha})
+
+
+@app.post("/repos/{name}/sync/blobs/check")
+def sync_check_blobs(name: str, body: S.BlobCheckRequest):
+    """Check which blobs the server already has."""
+    repo = _open_repo(name)
+    have = []
+    need = []
+    for sha in body.shas:
+        if repo.store.exists(sha):
+            have.append(sha)
+        else:
+            need.append(sha)
+    return {"have": have, "need": need}
+
+
 # ----------------------------------------------------------- web UI
 @app.get("/", include_in_schema=False)
 def root():

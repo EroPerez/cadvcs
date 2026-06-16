@@ -183,3 +183,31 @@ class UpdateRoleRequest(BaseModel):
 
 # Fix forward reference
 AuthResponse.model_rebuild()
+
+
+# ——— Sync (push/pull) ———
+
+class SyncNegotiateRequest(BaseModel):
+    commit_ids: list[int] = Field(description="Commit IDs the client has")
+
+
+class SyncCommitData(BaseModel):
+    parent_id: int | None = None
+    parent2_id: int | None = None
+    author: str
+    message: str = ""
+    created_at: str
+    entries: dict[str, dict] = Field(
+        description="repo_path → {blob_sha, size_bytes}")
+
+
+class SyncPushRequest(BaseModel):
+    commits: list[SyncCommitData] = Field(
+        description="Commits in topological order (parent before child)")
+    branch: str
+    branch_head: int | None = Field(
+        None, description="Expected remote head (optimistic lock)")
+
+
+class BlobCheckRequest(BaseModel):
+    shas: list[str]
