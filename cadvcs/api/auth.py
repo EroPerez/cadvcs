@@ -154,6 +154,10 @@ def get_principal(
     except jwt.PyJWTError as exc:
         raise HTTPException(401, f"Token inválido: {exc}",
                             headers={"WWW-Authenticate": "Bearer"})
+    except Exception as exc:
+        logger.warning("Error validando token OIDC: %s", exc)
+        raise HTTPException(401, "Token inválido o proveedor OIDC no disponible",
+                            headers={"WWW-Authenticate": "Bearer"})
 
     username = (claims.get("preferred_username") or claims.get("email")
                 or claims["sub"])

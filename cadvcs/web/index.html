@@ -741,6 +741,7 @@
     <div id="userAvatar" class="user-avatar"></div>
     <span id="userName" class="username"></span>
     <span id="userRole" class="role-badge"></span>
+    <button class="btn-logout" id="copyTokenBtn" title="Copiar token para CLI">Token</button>
     <button class="btn-logout" id="logoutBtn">Salir</button>
   </div>
 </header>
@@ -868,6 +869,15 @@ function doLogout() {
 
 $("#showRegister").onclick = (e) => { e.preventDefault(); showAuth("register"); };
 $("#showLogin").onclick = (e) => { e.preventDefault(); showAuth("login"); };
+$("#copyTokenBtn").onclick = () => {
+  const tok = getToken();
+  if (!tok) { toast("No hay token activo", true); return; }
+  navigator.clipboard.writeText(tok).then(
+    () => toast("Token copiado al portapapeles"),
+    () => {
+      prompt("Copia el token manualmente:", tok);
+    });
+};
 $("#logoutBtn").onclick = () => { doLogout(); toast("Sesion cerrada"); };
 
 $("#loginBtn").onclick = async () => {
