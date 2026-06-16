@@ -19,7 +19,10 @@ cadvcs/
 ├── merge.py     Merge a 3 vías por entidad: clasifica cambios vs merge-base,
 │                auto-fusiona lo que no colisiona, reporta conflictos reales
 ├── repo.py      API: add/status/commit/log/branch/switch/tag/diff/merge/blame
-└── cli.py       CLI con comandos tipo Git
+├── cli.py       CLI con comandos tipo Git + push/pull/remote/clone
+├── client.py    Cliente HTTP para sincronización con servidores remotos
+├── remote.py    Configuración de remotes (almacenada en .cadvcs/config.json)
+└── auth_store.py  Almacén de credenciales (tokens JWT por servidor)
 ```
 
 ## Capacidades tipo Git
@@ -41,6 +44,56 @@ cadvcs checkout plano.dxf --ref v1.0 --out plano_v1.dxf
 ```
 
 El comando tiene un alias corto `cad` (`cad commit ...`). Tras `cad login` —que guarda tu token de sesión— `--user` es opcional: la identidad sale del token (o de `CADVCS_USER`). Ver la sección "Sesión y alias del CLI" más abajo.
+
+## Sincronización remota (push/pull/clone)
+
+Flujo distribuido tipo Git para trabajar con un servidor cadvcs remoto:
+
+```bash
+# Clonar un repo existente del servidor
+cadvcs clone http://servidor:8000 proyecto-1
+
+# Trabajar localmente
+cd proyecto-1
+cadvcs add plano.dxf
+cadvcs commit -m "Planta baja actualizada"
+
+# Subir cambios al servidor
+cadvcs push                            # push rama actual a origin
+
+# Bajar cambios del servidor
+cadvcs pull                            # pull rama actual desde origin
+```
+
+### Gestión de remotes
+
+Similar a `git remote`, cada repo local puede configurar múltiples servidores:
+
+```bash
+cadvcs remote add origin http://prod.example.com:8000              # nombre de repo = dir local
+cadvcs remote add origin http://prod.example.com:8000 --repo-name nave  # nombre explícito
+cadvcs remote add staging http://staging:8000
+cadvcs remote list
+cadvcs remote remove staging
+```
+
+La configuración se guarda en `.cadvcs/config.json` dentro del repo. Al usar `clone`, el remote `origin` se configura automáticamente.
+
+### Protocolo de sincronización
+
+El push/pull transfiere solo lo necesario:
+
+1. **Negociación de refs**: el cliente obtiene los heads de las ramas remotas para saber qué commits faltan.
+2. **Transferencia de blobs**: antes de enviar commits, el cliente pregunta qué blobs tiene el servidor (`sync/blobs/check`) y solo sube los que faltan — deduplicación por SHA-256 igual que en el store local.
+3. **Pack de commits**: los commits se envían en orden topológico (padres primero) con sus entries; el servidor los aplica atómicamente y actualiza la ref de la rama.
+4. **Optimistic lock**: el push verifica que la rama remota no haya avanzado desde la última vez que se consultó. Si avanzó, se rechaza con 409 y hay que hacer pull primero.
+
+```bash
+cadvcs push origin main                # push explícito de una rama
+cadvcs pull origin feature-x           # pull de otra rama
+```
+
+El token de autenticación se toma del almacén de credenciales (`cadvcs login --server <url>`). Si el repo remoto no existe aún, `push` lo crea automáticamente.
 
 ## El merge a nivel de entidad
 
@@ -117,6 +170,15 @@ POST   /repos/{n}/merge                {branch, author}      → 200 | 409
 GET    /repos/{n}/blame/{path}?ref=    atribución por entidad
 POST   /repos/{n}/locks | GET          adquirir / listar     → 201 | 423
 DELETE /repos/{n}/locks/{path}?owner=  liberar               → 204
+
+# Sincronización (push/pull)
+GET    /repos/{n}/sync/refs            refs de ramas y tags
+POST   /repos/{n}/sync/negotiate       intercambio de commit IDs
+POST   /repos/{n}/sync/push            push pack de commits  → 200 | 409 | 422
+GET    /repos/{n}/sync/pull?branch=    pull commits desde un punto
+PUT    /repos/{n}/sync/blobs/{sha}     subir blob por SHA
+GET    /repos/{n}/sync/blobs/{sha}     descargar blob por SHA
+POST   /repos/{n}/sync/blobs/check     verificar qué blobs tiene el server
 ```
 
 Semántica HTTP: 409 para conflictos de merge con payload estructurado (handle, razón, ours/theirs), 423 Locked para locks ajenos, 422 para errores de dominio (commit vacío, ref inexistente). El conflicto 409 devuelve exactamente lo que una UI de resolución necesita:
