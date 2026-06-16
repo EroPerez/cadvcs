@@ -114,6 +114,8 @@ def health():
                         content={"status": "ok" if status == 200 else "degraded",
                                  "backend": "postgresql" if os.environ.get(
                                      "CADVCS_DB_URL") else "sqlite",
+                                 "blob_backend": "s3" if os.environ.get(
+                                     "CADVCS_BLOB_URL") else "local",
                                  "render_cache": checks["render_cache"],
                                  "event_bus": checks["event_bus"],
                                  "dwg_converter": checks["dwg_converter"],
